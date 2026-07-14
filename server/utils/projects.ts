@@ -46,7 +46,15 @@ export async function updateProject(db: Db, id: number, patch: Partial<Pick<Proj
   let rank = existing.rank
   if (patch.status && listId(patch.status) !== listId(existing.status))
     rank = await nextRank(db, listId(patch.status))
-  return repo.save({ ...existing, ...patch, rank, updatedAt: new Date().toISOString() })
+
+  // Whitelist only allowed fields to prevent mass-assignment
+  const whitelisted = {
+    ...(patch.name !== undefined && { name: patch.name }),
+    ...(patch.description !== undefined && { description: patch.description }),
+    ...(patch.status !== undefined && { status: patch.status }),
+  }
+
+  return repo.save({ ...existing, ...whitelisted, rank, updatedAt: new Date().toISOString() })
 }
 
 export async function reorderList(db: Db, list: Exclude<ListName, 'done'>, orderedIds: number[]): Promise<void> {
