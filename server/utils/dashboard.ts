@@ -2,12 +2,26 @@ import { Project, Quote, Expense, InventoryItem } from '../database/entities'
 import { listProjects } from './projects'
 import type { Db } from './db'
 
-const DAY = 86_400_000
+function getLocalDateString(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
 
 function withinDays(dateStr: string | null, days: number, now: Date): boolean {
   if (!dateStr) return false
-  const diff = new Date(dateStr).getTime() - now.getTime()
-  return diff >= 0 && diff <= days * DAY
+
+  // Build local date strings for lexical comparison (YYYY-MM-DD)
+  const today = getLocalDateString(now)
+
+  // Calculate the end of the window (today + days)
+  const windowEndDate = new Date(now)
+  windowEndDate.setDate(windowEndDate.getDate() + days)
+  const windowEnd = getLocalDateString(windowEndDate)
+
+  // Include if dateStr is within [today, windowEnd] (inclusive on both ends)
+  return dateStr >= today && dateStr <= windowEnd
 }
 
 export async function dashboardData(db: Db, now = new Date()) {
