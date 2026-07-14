@@ -1,7 +1,5 @@
 import { InventoryItem } from '../../database/entities'
 
-const createError = globalThis.createError ?? ((e: any) => Object.assign(new Error(e.statusMessage), e))
-
 export default defineEventHandler(async (event) => {
   const id = Number(getRouterParam(event, 'id'))
   const repo = (await useDb()).getRepository(InventoryItem)
