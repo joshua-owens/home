@@ -1,0 +1,47 @@
+{
+  "name": "house",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@nuxt/ui": "^4.9.0",
+    "@tiptap/core": "^3.27.4",
+    "@tiptap/extension-bubble-menu": "^3.27.4",
+    "@tiptap/extension-code": "^3.27.4",
+    "@tiptap/extension-collaboration": "^3.27.4",
+    "@tiptap/extension-drag-handle": "^3.27.4",
+    "@tiptap/extension-drag-handle-vue-3": "^3.27.4",
+    "@tiptap/extension-floating-menu": "^3.27.4",
+    "@tiptap/extension-horizontal-rule": "^3.27.4",
+    "@tiptap/extension-image": "^3.27.4",
+    "@tiptap/extension-mention": "^3.27.4",
+    "@tiptap/extension-node-range": "^3.27.4",
+    "@tiptap/extension-placeholder": "^3.27.4",
+    "@tiptap/markdown": "^3.27.4",
+    "@tiptap/pm": "^3.27.4",
+    "@tiptap/starter-kit": "^3.27.4",
+    "@tiptap/suggestion": "^3.27.4",
+    "@tiptap/vue-3": "^3.27.4",
+    "better-sqlite3": "^12.11.1",
+    "drizzle-orm": "^0.45.2",
+    "nuxt": "^4.4.8",
+    "nuxt-auth-utils": "^0.5.29",
+    "openai": "^6.46.0",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vue": "^3.5.39",
+    "vue-router": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "drizzle-kit": "^0.31.10",
+    "vitest": "^4.1.10"
+  }
+}
