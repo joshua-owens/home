@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import { marked } from 'marked'
+import DOMPurify from 'isomorphic-dompurify'
+// Report bodies are LLM output (which reads external content) — sanitize
+// before v-html or a crafted response is an XSS into the user's session.
+const renderMarkdown = (md: string) => DOMPurify.sanitize(marked.parse(md, { async: false }))
 const props = defineProps<{ projectId: number }>()
 const { data: reports, refresh } = await useFetch(`/api/projects/${props.projectId}/research`)
 const toast = useToast()
@@ -35,7 +39,7 @@ async function run() {
         </div>
       </template>
       <UAlert v-if="r.status === 'failed'" color="error" :title="r.error ?? 'Unknown error'" />
-      <div v-else-if="r.status === 'complete'" class="prose prose-sm dark:prose-invert max-w-none" v-html="marked(r.body)" />
+      <div v-else-if="r.status === 'complete'" class="prose prose-sm dark:prose-invert max-w-none" v-html="renderMarkdown(r.body)" />
       <p v-else class="text-dimmed text-sm">Working…</p>
     </UCard>
   </div>
