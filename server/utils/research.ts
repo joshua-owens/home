@@ -35,11 +35,15 @@ export async function runResearch(db: Db, projectId: number, opts: { client: any
 
   try {
     const completion = await Promise.race([
-      opts.client.chat.completions.create({
-        model: opts.model,
-        messages: [{ role: 'user', content: buildResearchPrompt(project, settings, projectQuotes) }],
-        signal: controller.signal,
-      }),
+      // signal must go in the SDK's second (request options) argument —
+      // in the body it would be ignored and the request never aborted.
+      opts.client.chat.completions.create(
+        {
+          model: opts.model,
+          messages: [{ role: 'user', content: buildResearchPrompt(project, settings, projectQuotes) }],
+        },
+        { signal: controller.signal },
+      ),
       new Promise<never>((_, reject) => {
         timeoutId = setTimeout(() => {
           controller.abort()

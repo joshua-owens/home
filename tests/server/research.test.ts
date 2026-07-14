@@ -62,8 +62,9 @@ describe('research', () => {
       const p = await createProject(db, { name: 'X' })
       let recordedSignal: AbortSignal | undefined
       const neverResolvesClient = {
-        chat: { completions: { create: async (opts: any) => {
-          recordedSignal = opts.signal
+        chat: { completions: { create: async (_body: any, options?: { signal?: AbortSignal }) => {
+          // the SDK contract puts signal in the second (request options) arg
+          recordedSignal = options?.signal
           // Never resolve, just hang
           return new Promise(() => {})
         } } },
