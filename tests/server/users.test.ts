@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createDataSource } from '../../server/database/data-source'
-import { createUser, authenticate, countUsers } from '../../server/utils/users'
+import { createUser, createFirstUser, authenticate, countUsers } from '../../server/utils/users'
 
 describe('users', () => {
   it('creates a user and authenticates with correct password only', async () => {
@@ -13,6 +13,17 @@ describe('users', () => {
     expect(await authenticate(db, 'jess', 'hunter22')).toMatchObject({ username: 'jess' })
     expect(await authenticate(db, 'jess', 'wrong')).toBeNull()
     expect(await authenticate(db, 'nobody', 'x')).toBeNull()
+    await db.destroy()
+  })
+
+  it('createFirstUser only creates when no users exist', async () => {
+    const db = await createDataSource(':memory:')
+    const first = await createFirstUser(db, { username: 'jess', password: 'hunter22', displayName: 'Jess' })
+    expect(first).toMatchObject({ username: 'jess' })
+    expect(await authenticate(db, 'jess', 'hunter22')).toMatchObject({ username: 'jess' })
+    const second = await createFirstUser(db, { username: 'sam', password: 'password9', displayName: 'Sam' })
+    expect(second).toBeNull()
+    expect(await countUsers(db)).toBe(1)
     await db.destroy()
   })
 })

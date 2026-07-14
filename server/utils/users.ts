@@ -22,6 +22,19 @@ export async function createUser(db: Db, input: { username: string; password: st
   }))
 }
 
+// First-run setup only: the count guard and insert must be one atomic
+// statement, or two concurrent setup requests can both pass a JS-side
+// "0 users" check and each create an account.
+export async function createFirstUser(db: Db, input: { username: string; password: string; displayName: string }): Promise<User | null> {
+  const username = input.username.trim().toLowerCase()
+  await db.query(
+    `INSERT INTO users (username, password_hash, display_name, created_at)
+     SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM users) = 0`,
+    [username, hashPw(input.password), input.displayName, new Date().toISOString()],
+  )
+  return db.getRepository(User).findOneBy({ username })
+}
+
 export async function authenticate(db: Db, username: string, password: string): Promise<User | null> {
   const u = await db.getRepository(User).findOneBy({ username: username.trim().toLowerCase() })
   if (!u || !verifyPw(password, u.passwordHash)) return null
