@@ -6,6 +6,12 @@ export default defineNuxtConfig({
   devtools: { enabled: true },
   modules: ['@nuxt/ui', 'nuxt-auth-utils'],
   css: ['~/assets/css/main.css'],
+  nitro: {
+    externals: {
+      traceResolution: false,
+      inline: ['reflect-metadata'],
+    },
+  },
   runtimeConfig: {
     openrouterApiKey: '',       // NUXT_OPENROUTER_API_KEY
     researchModel: '',          // NUXT_RESEARCH_MODEL
