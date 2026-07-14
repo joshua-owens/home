@@ -25,7 +25,10 @@ const links = [
       </div>
     </aside>
     <main class="flex-1 p-6 overflow-x-auto">
-      <div class="md:hidden mb-4"><UNavigationMenu :items="links" /></div>
+      <div class="md:hidden mb-4 flex items-center justify-between gap-2">
+        <UNavigationMenu :items="links" />
+        <UButton variant="ghost" size="sm" icon="i-lucide-log-out" :title="`Log out ${user?.displayName ?? ''}`" @click="logout" />
+      </div>
       <slot />
     </main>
   </div>
