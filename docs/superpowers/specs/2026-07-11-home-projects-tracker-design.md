@@ -13,7 +13,7 @@ A self-hosted web app for tracking homeowner projects, contractor quotes, expens
 
 - **Nuxt 4.x monolith** — Vue frontend plus Nitro server routes (`server/api/`) in one codebase, one build, one container. Uses the Nuxt 4 directory structure (`app/` for the frontend, `server/` at root).
 - **Nuxt UI 4.x** — component library for all UI (forms, tables, modals, toasts, sidebar layout), giving consistent styling and built-in dark mode with minimal custom CSS.
-- **SQLite via Drizzle ORM** — database file lives on a mounted volume.
+- **SQLite via TypeORM** — database file lives on a mounted volume. Schema changes are managed with proper TypeORM migrations (generated from entity diffs, applied automatically at server startup) — no hand-written DDL.
 - **File storage** — uploaded attachments stored on disk under the same volume; metadata in DB.
 - **AI research** — Nitro server route calls **OpenRouter** (OpenAI-compatible API at `https://openrouter.ai/api/v1`) using the OpenAI SDK. Model is configurable via `RESEARCH_MODEL` env var; web-search capability depends on the chosen model / OpenRouter `:online` variant. Model selection is deferred — to be researched later; the route treats it as pure config.
 - **Auth** — `nuxt-auth-utils`: username + bcrypt password hash in SQLite, sealed session cookies. All API routes require a session.
