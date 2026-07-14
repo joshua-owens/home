@@ -1,13 +1,19 @@
 <script setup lang="ts">
-const filters = reactive({ categoryId: undefined as number | undefined, from: '', to: '' })
+const filters = reactive({ categoryId: undefined as number | undefined, projectId: 0, from: '', to: '' })
 const query = computed(() => ({
   ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
+  ...(filters.projectId ? { projectId: filters.projectId } : {}),
   ...(filters.from ? { from: filters.from } : {}),
   ...(filters.to ? { to: filters.to } : {}),
 }))
 const { data: expenses, refresh } = await useFetch('/api/expenses', { query })
 const { data: cats } = await useFetch('/api/categories')
+const { data: projects } = await useFetch('/api/projects')
 const catItems = computed(() => [{ label: 'All categories', value: undefined }, ...(cats.value ?? []).map(c => ({ label: c.name, value: c.id }))])
+const projectItems = computed(() => [
+  { label: 'All projects', value: 0 },
+  ...['active', 'backlog', 'done'].flatMap(k => (projects.value?.[k] ?? []).map((p: any) => ({ label: p.name, value: p.id }))),
+])
 const catName = (id: number | null) => cats.value?.find(c => c.id === id)?.name ?? ''
 const total = computed(() => (expenses.value ?? []).reduce((s, e) => s + e.amount, 0))
 const showNew = ref(false)
@@ -25,6 +31,7 @@ async function remove(id: number) {
       <UButton icon="i-lucide-plus" @click="showNew = true">New expense</UButton>
     </div>
     <div class="flex gap-2 items-end">
+      <USelect v-model="filters.projectId" :items="projectItems" value-key="value" class="w-44" />
       <USelect v-model="filters.categoryId" :items="catItems" value-key="value" class="w-44" />
       <UInput v-model="filters.from" type="date" /><UInput v-model="filters.to" type="date" />
       <div class="ml-auto font-semibold">Total: {{ fmt(total) }}</div>

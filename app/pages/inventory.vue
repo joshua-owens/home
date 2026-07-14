@@ -8,9 +8,24 @@ const filtered = computed(() => {
 })
 function warrantyBadge(expiry: string | null): { label: string; color: string } | null {
   if (!expiry) return null
-  const days = (new Date(expiry).getTime() - Date.now()) / 86_400_000
-  if (days < 0) return { label: 'warranty expired', color: 'neutral' }
-  if (days <= 60) return { label: 'warranty expiring', color: 'warning' }
+
+  // Build local date strings for lexical comparison (YYYY-MM-DD)
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  const todayString = `${year}-${month}-${day}`
+
+  // Calculate +60 days from today
+  const plus60Date = new Date(now)
+  plus60Date.setDate(plus60Date.getDate() + 60)
+  const plus60Year = plus60Date.getFullYear()
+  const plus60Month = String(plus60Date.getMonth() + 1).padStart(2, '0')
+  const plus60Day = String(plus60Date.getDate()).padStart(2, '0')
+  const plus60String = `${plus60Year}-${plus60Month}-${plus60Day}`
+
+  if (expiry < todayString) return { label: 'warranty expired', color: 'warning' }
+  if (expiry <= plus60String) return { label: 'warranty expiring', color: 'warning' }
   return { label: 'under warranty', color: 'success' }
 }
 async function remove(id: number) {
