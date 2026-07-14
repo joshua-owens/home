@@ -30,19 +30,36 @@ export async function runResearch(db: Db, projectId: number, opts: { client: any
 
   const finish = (patch: Partial<ResearchReport>) => repo.save({ ...report, ...patch })
 
+  const controller = new AbortController()
+  let timeoutId: any
+
   try {
     const completion = await Promise.race([
       opts.client.chat.completions.create({
         model: opts.model,
         messages: [{ role: 'user', content: buildResearchPrompt(project, settings, projectQuotes) }],
+        signal: controller.signal,
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Research timed out after 5 minutes')), opts.timeoutMs ?? DEFAULT_TIMEOUT)),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort()
+          reject(new Error('Research timed out after 5 minutes'))
+        }, opts.timeoutMs ?? DEFAULT_TIMEOUT)
+      }),
     ]) as any
     const body = completion.choices?.[0]?.message?.content ?? ''
-    if (!body) return finish({ status: 'failed', error: 'Model returned empty response' })
-    return finish({ status: 'complete', body })
+    if (!body) return await finish({ status: 'failed', error: 'Model returned empty response' })
+    return await finish({ status: 'complete', body })
   } catch (e: any) {
-    return finish({ status: 'failed', error: String(e?.message ?? e) })
+    const errorMsg = String(e?.message ?? e)
+    try {
+      return await finish({ status: 'failed', error: errorMsg })
+    } catch (finishError: any) {
+      console.error('Original error:', errorMsg, 'Finish error:', String(finishError?.message ?? finishError))
+      return { ...report, status: 'failed', error: errorMsg } as ResearchReport
+    }
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 
