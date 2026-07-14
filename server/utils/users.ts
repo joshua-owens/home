@@ -1,4 +1,3 @@
-import 'reflect-metadata'
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { User } from '../database/entities'
 import type { Db } from './db'

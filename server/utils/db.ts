@@ -1,4 +1,3 @@
-import 'reflect-metadata'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import type { DataSource } from 'typeorm'
