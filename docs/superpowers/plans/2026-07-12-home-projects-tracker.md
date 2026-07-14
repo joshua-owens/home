@@ -4,9 +4,9 @@
 
 **Goal:** A self-hosted Nuxt 4 app for tracking homeowner projects, quotes, expenses, and inventory, with an OpenRouter-backed AI research report feature, deployed as one Docker container.
 
-**Architecture:** Nuxt 4 monolith — Vue frontend (`app/`) plus Nitro server routes (`server/api/`). SQLite via Drizzle ORM on a `/data` volume, which also holds uploaded files. Session-cookie auth via `nuxt-auth-utils`. AI research runs server-side in a background promise with a DB-row lifecycle.
+**Architecture:** Nuxt 4 monolith — Vue frontend (`app/`) plus Nitro server routes (`server/api/`). SQLite via TypeORM (better-sqlite3 driver) on a `/data` volume, which also holds uploaded files. Schema changes are managed with proper TypeORM migrations — generated from entity diffs and applied automatically at server startup (no hand-written DDL after the initial migration). Session-cookie auth via `nuxt-auth-utils`. AI research runs server-side in a background promise with a DB-row lifecycle.
 
-**Tech Stack:** Nuxt 4.x, Nuxt UI 4.x, Drizzle ORM + better-sqlite3, nuxt-auth-utils, OpenAI SDK (pointed at OpenRouter), Vitest.
+**Tech Stack:** Nuxt 4.x, Nuxt UI 4.x, TypeORM + reflect-metadata + better-sqlite3, nuxt-auth-utils, OpenAI SDK (pointed at OpenRouter), Vitest.
 
 ## Global Constraints
 
@@ -22,6 +22,13 @@
 - Multiple accepted quotes allowed; expected cost = sum of accepted.
 - Research: 5-minute timeout; startup sweep marks orphaned `pending` reports `failed`.
 - TDD with Vitest for server logic. Commit after every green cycle.
+
+**TypeORM / decorator conventions (binding):**
+- Persistence is **TypeORM** with entity classes in `server/database/entities.ts`. `useDb()` returns an initialized `DataSource`; data-access utils get a repository via `db.getRepository(Entity)` and use `find` / `findOneBy` / `save` / `delete`, dropping to `createQueryBuilder` only where set/range logic needs it (rank reordering, expense date ranges, bulk status sweeps).
+- Repository methods are **async**. Every data-access util and the tests that call them are therefore `async`/`await`. `createDataSource(path)` and `useDb()` are async (they `initialize()` and run migrations).
+- **esbuild/Vite do not emit `emitDecoratorMetadata`.** Never rely on reflected column types. Always give `@Column` an explicit type string, e.g. `@Column('text')`, `@Column('integer')`, `@Column('real')`. `@PrimaryGeneratedColumn()` and explicit relation types (`@ManyToOne(() => Project, ...)`) are safe because they don't depend on reflected metadata. `reflect-metadata` is still imported once at entry so the decorators register.
+- Schema is created **only** by migrations (`synchronize: false` everywhere, including tests). The DataSource runs pending migrations on initialize (`migrationsRun: true`). Future schema changes are produced with `npm run migration:generate` against a live dev DB; the first migration is hand-authored (generate needs an existing DB to diff).
+- Column names stay snake_case in the DB (`@Column('text', { name: 'password_hash' })`); entity properties stay camelCase, so every interface/type name used across tasks is unchanged from the original plan.
 
 ---
 
@@ -99,196 +106,299 @@ git add -A && git commit -m "chore: scaffold Nuxt 4 app with Nuxt UI, auth-utils
 
 ---
 
-### Task 2: Database schema + db util
+### Task 2: TypeORM entities, migrations + db util (dependency swap)
+
+Task 1 (already merged) installed `drizzle-orm`, `drizzle-kit`, `better-sqlite3`. This task discards the Drizzle approach entirely and switches to TypeORM. It is self-contained: it removes the Drizzle deps, installs TypeORM, and builds the entity/migration/DataSource layer every later task consumes. If a Drizzle implementation of Task 2 exists on a branch, do not merge it — implement from scratch here.
 
 **Files:**
-- Create: `server/database/schema.ts`, `server/utils/db.ts`, `drizzle.config.ts`
+- Create: `server/database/entities.ts`, `server/database/migrations/1720000000000-InitSchema.ts`, `server/database/data-source.ts`, `server/utils/db.ts`
+- Modify: `package.json` (deps + `migration:*` scripts), `tsconfig.json` (decorator options), `nuxt.config.ts` (import `reflect-metadata`)
 - Test: `tests/server/db.test.ts`
 
 **Interfaces:**
-- Produces: `useDb(): DrizzleDb` (better-sqlite3-backed, runs migrations on first use); exported Drizzle tables `users, householdSettings, projects, quotes, categories, expenses, inventoryItems, researchReports, attachments` and types `Project`, `Quote`, etc. via `$inferSelect`.
-- Test-only: `useTestDb()` creating an in-memory db for unit tests.
+- Produces: entity classes `User, HouseholdSettings, Project, Quote, Category, Expense, InventoryItem, ResearchReport, Attachment` (each class doubles as its TypeScript type — the names `Project`, `Quote`, `Expense`, `InventoryItem`, `ResearchReport`, `Attachment`, `User` are unchanged from the Drizzle plan, so every later task's imports keep working). `createDataSource(path): Promise<DataSource>` (pure/testable: initializes, runs migrations, seeds — no Nuxt, no fs beyond the sqlite file). `useDb(): Promise<DataSource>` (Nuxt singleton: resolves `runtimeConfig.dataDir`, creates `uploads/`, caches the initialized DataSource). Exported `type Db = DataSource`.
+- All data-access utils in later tasks are async and take a `DataSource` and call `db.getRepository(Entity)`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Swap dependencies and configure decorators**
+
+```bash
+npm uninstall drizzle-orm drizzle-kit
+npm install typeorm reflect-metadata           # keep better-sqlite3 (installed in Task 1) — TypeORM uses it as a driver
+rm -f drizzle.config.ts                          # remove Drizzle config if Task 1 created one
+```
+
+`reflect-metadata` must be imported once before any entity is used. Add it as the very first line of `nuxt.config.ts` (covers the Nitro build) and it is imported transitively by `entities.ts` for Vitest:
+
+`nuxt.config.ts` — add as the first line of the file:
+```ts
+import 'reflect-metadata'
+```
+
+TypeORM decorators need `experimentalDecorators`. **Nuxt 4's root `tsconfig.json` only references the generated `.nuxt/tsconfig.json` projects and does not merge our `compilerOptions` into them**, so add an explicit `compilerOptions` block to the root `tsconfig.json` (this is what `tsc`/the IDE read for our `server/` sources):
+```jsonc
+{
+  // Nuxt-generated references stay as-is:
+  "extends": "./.nuxt/tsconfig.json",
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
+```
+`emitDecoratorMetadata` is set for tsc/IDE convenience only — **the runtime (esbuild/Vite/Nitro) does not emit it**, so entity columns must always declare an explicit type string (`@Column('text')`), never rely on reflected types. If the scaffolded root `tsconfig.json` has no `compilerOptions` key, add the whole block; if it has one, merge these two options in.
+
+- [ ] **Step 2: Write the failing test**
 
 `tests/server/db.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
-import { projects, categories } from '../../server/database/schema'
+import { createDataSource } from '../../server/database/data-source'
+import { Project, Category } from '../../server/database/entities'
 
 describe('db', () => {
-  it('creates schema and seeds default categories', () => {
-    const db = createDb(':memory:')
-    const cats = db.select().from(categories).all()
+  it('runs migrations, creates tables, seeds categories, round-trips a row', async () => {
+    const db = await createDataSource(':memory:')
+    const cats = await db.getRepository(Category).find()
     expect(cats.map(c => c.name).sort()).toEqual(
       ['appliance', 'improvement', 'maintenance', 'other', 'utilities'])
-    db.insert(projects).values({ name: 'Mini split', status: 'idea', rank: 1 }).run()
-    expect(db.select().from(projects).all()).toHaveLength(1)
+    const repo = db.getRepository(Project)
+    const saved = await repo.save(repo.create({ name: 'Mini split', status: 'idea', rank: 1 }))
+    expect(saved.id).toBeGreaterThan(0)
+    expect(await repo.find()).toHaveLength(1)
+    await db.destroy()
   })
 })
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
-Run: `npm test` — Expected: FAIL, cannot resolve `server/utils/db`.
+Run: `npm test` — Expected: FAIL, cannot resolve `server/database/data-source`.
 
-- [ ] **Step 3: Implement schema and db factory**
+- [ ] **Step 4: Implement entities, migration, DataSource, and db util**
 
-`server/database/schema.ts`:
+`server/database/entities.ts` — explicit column types throughout; snake_case DB names via `name:`; timestamps set with `@BeforeInsert` so they stay ISO-8601 text:
 ```ts
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core'
+import 'reflect-metadata'
+import { Entity, PrimaryGeneratedColumn, PrimaryColumn, Column, BeforeInsert } from 'typeorm'
 
-export const users = sqliteTable('users', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  username: text('username').notNull().unique(),
-  passwordHash: text('password_hash').notNull(),
-  displayName: text('display_name').notNull(),
-  createdAt: text('created_at').notNull().$defaultFn(() => new Date().toISOString()),
-})
+export type ProjectStatusValue = 'idea' | 'researching' | 'quoting' | 'in_progress' | 'done' | 'on_hold'
+export type QuoteStatusValue = 'pending' | 'accepted' | 'declined'
+export type ReportStatusValue = 'pending' | 'complete' | 'failed'
+export type OwnerTypeValue = 'project' | 'quote' | 'expense' | 'inventory_item'
 
-export const householdSettings = sqliteTable('household_settings', {
-  id: integer('id').primaryKey(), // singleton row id=1
-  region: text('region').notNull().default(''),
-  houseFacts: text('house_facts').notNull().default(''),
-})
+@Entity('users')
+export class User {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('text', { unique: true }) username!: string
+  @Column('text', { name: 'password_hash' }) passwordHash!: string
+  @Column('text', { name: 'display_name' }) displayName!: string
+  @Column('text', { name: 'created_at' }) createdAt!: string
+  @BeforeInsert() _setCreatedAt() { if (!this.createdAt) this.createdAt = new Date().toISOString() }
+}
 
-export const projects = sqliteTable('projects', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: text('name').notNull(),
-  description: text('description').notNull().default(''),
-  status: text('status', { enum: ['idea', 'researching', 'quoting', 'in_progress', 'done', 'on_hold'] }).notNull().default('idea'),
-  rank: integer('rank').notNull().default(0), // position within its list (Backlog or Active)
-  createdBy: integer('created_by').references(() => users.id),
-  createdAt: text('created_at').notNull().$defaultFn(() => new Date().toISOString()),
-  updatedAt: text('updated_at').notNull().$defaultFn(() => new Date().toISOString()),
-})
+@Entity('household_settings')
+export class HouseholdSettings {
+  @PrimaryColumn('integer') id!: number // singleton row id=1
+  @Column('text', { default: '' }) region!: string
+  @Column('text', { name: 'house_facts', default: '' }) houseFacts!: string
+}
 
-export const quotes = sqliteTable('quotes', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  projectId: integer('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
-  companyName: text('company_name').notNull(),
-  contactInfo: text('contact_info').notNull().default(''),
-  amount: real('amount').notNull(),
-  scopeNotes: text('scope_notes').notNull().default(''),
-  dateReceived: text('date_received'),
-  validUntil: text('valid_until'),
-  status: text('status', { enum: ['pending', 'accepted', 'declined'] }).notNull().default('pending'),
-})
+@Entity('projects')
+export class Project {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('text') name!: string
+  @Column('text', { default: '' }) description!: string
+  @Column('text', { default: 'idea' }) status!: ProjectStatusValue
+  @Column('integer', { default: 0 }) rank!: number // position within its list (Backlog or Active)
+  @Column('integer', { name: 'created_by', nullable: true }) createdBy!: number | null
+  @Column('text', { name: 'created_at' }) createdAt!: string
+  @Column('text', { name: 'updated_at' }) updatedAt!: string
+  @BeforeInsert() _initTimestamps() {
+    const now = new Date().toISOString()
+    if (!this.createdAt) this.createdAt = now
+    if (!this.updatedAt) this.updatedAt = now
+  }
+}
 
-export const categories = sqliteTable('categories', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: text('name').notNull().unique(),
-})
+@Entity('quotes')
+export class Quote {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('integer', { name: 'project_id' }) projectId!: number
+  @Column('text', { name: 'company_name' }) companyName!: string
+  @Column('text', { name: 'contact_info', default: '' }) contactInfo!: string
+  @Column('real') amount!: number
+  @Column('text', { name: 'scope_notes', default: '' }) scopeNotes!: string
+  @Column('text', { name: 'date_received', nullable: true }) dateReceived!: string | null
+  @Column('text', { name: 'valid_until', nullable: true }) validUntil!: string | null
+  @Column('text', { default: 'pending' }) status!: QuoteStatusValue
+}
 
-export const expenses = sqliteTable('expenses', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  projectId: integer('project_id').references(() => projects.id, { onDelete: 'cascade' }), // null = general home expense
-  categoryId: integer('category_id').references(() => categories.id),
-  amount: real('amount').notNull(),
-  date: text('date').notNull(),
-  vendor: text('vendor').notNull().default(''),
-  note: text('note').notNull().default(''),
-})
+@Entity('categories')
+export class Category {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('text', { unique: true }) name!: string
+}
 
-export const inventoryItems = sqliteTable('inventory_items', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: text('name').notNull(),
-  location: text('location').notNull().default(''),
-  brand: text('brand').notNull().default(''),
-  model: text('model').notNull().default(''),
-  serial: text('serial').notNull().default(''),
-  purchaseDate: text('purchase_date'),
-  warrantyExpiry: text('warranty_expiry'),
-  notes: text('notes').notNull().default(''),
-})
+@Entity('expenses')
+export class Expense {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('integer', { name: 'project_id', nullable: true }) projectId!: number | null // null = general home expense
+  @Column('integer', { name: 'category_id', nullable: true }) categoryId!: number | null
+  @Column('real') amount!: number
+  @Column('text') date!: string
+  @Column('text', { default: '' }) vendor!: string
+  @Column('text', { default: '' }) note!: string
+}
 
-export const researchReports = sqliteTable('research_reports', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  projectId: integer('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
-  status: text('status', { enum: ['pending', 'complete', 'failed'] }).notNull().default('pending'),
-  body: text('body').notNull().default(''),
-  error: text('error'),
-  model: text('model').notNull().default(''),
-  createdAt: text('created_at').notNull().$defaultFn(() => new Date().toISOString()),
-})
+@Entity('inventory_items')
+export class InventoryItem {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('text') name!: string
+  @Column('text', { default: '' }) location!: string
+  @Column('text', { default: '' }) brand!: string
+  @Column('text', { default: '' }) model!: string
+  @Column('text', { default: '' }) serial!: string
+  @Column('text', { name: 'purchase_date', nullable: true }) purchaseDate!: string | null
+  @Column('text', { name: 'warranty_expiry', nullable: true }) warrantyExpiry!: string | null
+  @Column('text', { default: '' }) notes!: string
+}
 
-export const attachments = sqliteTable('attachments', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  ownerType: text('owner_type', { enum: ['project', 'quote', 'expense', 'inventory_item'] }).notNull(),
-  ownerId: integer('owner_id').notNull(),
-  filename: text('filename').notNull(),
-  mimeType: text('mime_type').notNull(),
-  size: integer('size').notNull(),
-  diskPath: text('disk_path').notNull(), // relative to DATA_DIR/uploads
-  createdAt: text('created_at').notNull().$defaultFn(() => new Date().toISOString()),
-})
+@Entity('research_reports')
+export class ResearchReport {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('integer', { name: 'project_id' }) projectId!: number
+  @Column('text', { default: 'pending' }) status!: ReportStatusValue
+  @Column('text', { default: '' }) body!: string
+  @Column('text', { nullable: true }) error!: string | null
+  @Column('text', { default: '' }) model!: string
+  @Column('text', { name: 'created_at' }) createdAt!: string
+  @BeforeInsert() _setCreatedAt() { if (!this.createdAt) this.createdAt = new Date().toISOString() }
+}
 
-export type Project = typeof projects.$inferSelect
-export type Quote = typeof quotes.$inferSelect
-export type Expense = typeof expenses.$inferSelect
-export type InventoryItem = typeof inventoryItems.$inferSelect
-export type ResearchReport = typeof researchReports.$inferSelect
-export type Attachment = typeof attachments.$inferSelect
-export type User = typeof users.$inferSelect
+@Entity('attachments')
+export class Attachment {
+  @PrimaryGeneratedColumn() id!: number
+  @Column('text', { name: 'owner_type' }) ownerType!: OwnerTypeValue
+  @Column('integer', { name: 'owner_id' }) ownerId!: number
+  @Column('text') filename!: string
+  @Column('text', { name: 'mime_type' }) mimeType!: string
+  @Column('integer') size!: number
+  @Column('text', { name: 'disk_path' }) diskPath!: string // relative to DATA_DIR/uploads
+  @Column('text', { name: 'created_at' }) createdAt!: string
+  @BeforeInsert() _setCreatedAt() { if (!this.createdAt) this.createdAt = new Date().toISOString() }
+}
+
+export const entities = [User, HouseholdSettings, Project, Quote, Category, Expense, InventoryItem, ResearchReport, Attachment]
+```
+
+`server/database/migrations/1720000000000-InitSchema.ts` — hand-authored initial migration. The DDL is byte-for-byte the schema the Drizzle plan created, including every FK and `ON DELETE CASCADE`. Future changes are generated (`npm run migration:generate`) against a live dev DB:
+```ts
+import type { MigrationInterface, QueryRunner } from 'typeorm'
+
+export class InitSchema1720000000000 implements MigrationInterface {
+  name = 'InitSchema1720000000000'
+
+  async up(q: QueryRunner): Promise<void> {
+    await q.query(`CREATE TABLE "users" (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, created_at TEXT NOT NULL)`)
+    await q.query(`CREATE TABLE "household_settings" (id INTEGER PRIMARY KEY, region TEXT NOT NULL DEFAULT '', house_facts TEXT NOT NULL DEFAULT '')`)
+    await q.query(`CREATE TABLE "projects" (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'idea', rank INTEGER NOT NULL DEFAULT 0, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+    await q.query(`CREATE TABLE "quotes" (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, company_name TEXT NOT NULL, contact_info TEXT NOT NULL DEFAULT '', amount REAL NOT NULL, scope_notes TEXT NOT NULL DEFAULT '', date_received TEXT, valid_until TEXT, status TEXT NOT NULL DEFAULT 'pending')`)
+    await q.query(`CREATE TABLE "categories" (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)`)
+    await q.query(`CREATE TABLE "expenses" (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, category_id INTEGER REFERENCES categories(id), amount REAL NOT NULL, date TEXT NOT NULL, vendor TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '')`)
+    await q.query(`CREATE TABLE "inventory_items" (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', brand TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', serial TEXT NOT NULL DEFAULT '', purchase_date TEXT, warranty_expiry TEXT, notes TEXT NOT NULL DEFAULT '')`)
+    await q.query(`CREATE TABLE "research_reports" (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending', body TEXT NOT NULL DEFAULT '', error TEXT, model TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`)
+    await q.query(`CREATE TABLE "attachments" (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_type TEXT NOT NULL, owner_id INTEGER NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, disk_path TEXT NOT NULL, created_at TEXT NOT NULL)`)
+  }
+
+  async down(q: QueryRunner): Promise<void> {
+    for (const t of ['attachments', 'research_reports', 'inventory_items', 'expenses', 'categories', 'quotes', 'projects', 'household_settings', 'users'])
+      await q.query(`DROP TABLE "${t}"`)
+  }
+}
+```
+
+`server/database/data-source.ts` — `makeDataSource` builds the config (foreign keys ON, WAL, `synchronize: false`, `migrationsRun: true`); `createDataSource` initializes + seeds; the default export is the CLI DataSource used by `migration:*` scripts:
+```ts
+import 'reflect-metadata'
+import { join } from 'node:path'
+import { DataSource } from 'typeorm'
+import { entities, Category, HouseholdSettings } from './entities'
+import { InitSchema1720000000000 } from './migrations/1720000000000-InitSchema'
+
+const DEFAULT_CATEGORIES = ['maintenance', 'improvement', 'utilities', 'appliance', 'other']
+
+export function makeDataSource(database: string): DataSource {
+  return new DataSource({
+    type: 'better-sqlite3',
+    database,
+    entities,
+    migrations: [InitSchema1720000000000],
+    synchronize: false,     // schema comes only from migrations
+    migrationsRun: true,    // apply pending migrations on initialize()
+    prepareDatabase: (db) => {
+      db.pragma('journal_mode = WAL')
+      db.pragma('foreign_keys = ON')
+    },
+  })
+}
+
+async function seed(ds: DataSource): Promise<void> {
+  await ds.getRepository(Category).createQueryBuilder()
+    .insert().orIgnore().values(DEFAULT_CATEGORIES.map(name => ({ name }))).execute()
+  await ds.getRepository(HouseholdSettings).createQueryBuilder()
+    .insert().orIgnore().values({ id: 1 }).execute()
+}
+
+export async function createDataSource(path: string): Promise<DataSource> {
+  const ds = makeDataSource(path)
+  await ds.initialize()   // runs migrations (migrationsRun: true)
+  await seed(ds)          // INSERT-OR-IGNORE default categories + settings singleton
+  return ds
+}
+
+// Default export for the TypeORM CLI (`npm run migration:generate|run`).
+export default makeDataSource(join(process.env.NUXT_DATA_DIR ?? './data', 'sqlite.db'))
 ```
 
 `server/utils/db.ts`:
 ```ts
-import Database from 'better-sqlite3'
-import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
-import * as schema from '../database/schema'
+import type { DataSource } from 'typeorm'
+import { createDataSource } from '../database/data-source'
 
-export type Db = BetterSQLite3Database<typeof schema>
+export type Db = DataSource
 
-const DDL = `
-CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS household_settings (id INTEGER PRIMARY KEY, region TEXT NOT NULL DEFAULT '', house_facts TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'idea', rank INTEGER NOT NULL DEFAULT 0, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, company_name TEXT NOT NULL, contact_info TEXT NOT NULL DEFAULT '', amount REAL NOT NULL, scope_notes TEXT NOT NULL DEFAULT '', date_received TEXT, valid_until TEXT, status TEXT NOT NULL DEFAULT 'pending');
-CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
-CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, category_id INTEGER REFERENCES categories(id), amount REAL NOT NULL, date TEXT NOT NULL, vendor TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS inventory_items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', brand TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', serial TEXT NOT NULL DEFAULT '', purchase_date TEXT, warranty_expiry TEXT, notes TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS research_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending', body TEXT NOT NULL DEFAULT '', error TEXT, model TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_type TEXT NOT NULL, owner_id INTEGER NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, disk_path TEXT NOT NULL, created_at TEXT NOT NULL);
-`
+let _dbPromise: Promise<DataSource> | null = null
 
-const DEFAULT_CATEGORIES = ['maintenance', 'improvement', 'utilities', 'appliance', 'other']
-
-export function createDb(path: string): Db {
-  const sqlite = new Database(path)
-  sqlite.pragma('journal_mode = WAL')
-  sqlite.pragma('foreign_keys = ON')
-  sqlite.exec(DDL)
-  const insert = sqlite.prepare('INSERT OR IGNORE INTO categories (name) VALUES (?)')
-  for (const c of DEFAULT_CATEGORIES) insert.run(c)
-  sqlite.prepare('INSERT OR IGNORE INTO household_settings (id) VALUES (1)').run()
-  return drizzle(sqlite, { schema })
-}
-
-let _db: Db | null = null
-export function useDb(): Db {
-  if (!_db) {
+// Promise-cached singleton: concurrent first requests share one initialize().
+export function useDb(): Promise<DataSource> {
+  if (!_dbPromise) {
     const dataDir = useRuntimeConfig().dataDir
     mkdirSync(join(dataDir, 'uploads'), { recursive: true })
-    _db = createDb(join(dataDir, 'sqlite.db'))
+    _dbPromise = createDataSource(join(dataDir, 'sqlite.db'))
   }
-  return _db
+  return _dbPromise
 }
 ```
 
-Note: `createDb` is pure (testable without Nuxt); only `useDb` touches `useRuntimeConfig`. Keep DDL and Drizzle schema in sync by hand — one schema, no drizzle-kit migrations needed at this scale (drizzle-kit stays available for future use).
+Add to `package.json` scripts (TypeORM CLI over ts via the esm loader):
+```json
+"migration:generate": "typeorm-ts-node-esm migration:generate -d server/database/data-source.ts server/database/migrations/Change",
+"migration:run": "typeorm-ts-node-esm migration:run -d server/database/data-source.ts"
+```
+`migration:generate` diffs the entities against the DB the default DataSource points at (`./data/sqlite.db`), so run the app once (or `migration:run`) first to have a DB to diff. The first migration above is hand-authored precisely because generate needs a pre-existing DB.
 
-- [ ] **Step 4: Run test to verify it passes**
+Notes: `createDataSource` is pure (explicit path, no Nuxt) so tests use it directly; only `useDb` touches `useRuntimeConfig`/fs. `synchronize` is OFF everywhere — schema exists solely because `migrationsRun` applies the migration on initialize (this holds for `:memory:` too, since each connection re-runs migrations on its fresh database). Foreign-key cascade is enforced by the DDL FKs plus `PRAGMA foreign_keys = ON` set in `prepareDatabase`.
+
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `npm test` — Expected: PASS (1 test).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add server tests drizzle.config.ts 2>/dev/null; git add -A && git commit -m "feat: database schema, db factory with seeded categories"
+git add -A && git commit -m "feat: TypeORM entities, initial migration, DataSource + db util with seeded categories"
 ```
 
 ---
@@ -302,28 +412,29 @@ git add server tests drizzle.config.ts 2>/dev/null; git add -A && git commit -m 
 - Test: `tests/server/users.test.ts`
 
 **Interfaces:**
-- Consumes: `createDb`/`useDb`, `users` table (Task 2). `nuxt-auth-utils` provides `hashPassword`, `verifyPassword`, `setUserSession`, `requireUserSession`, `getUserSession`.
-- Produces: `createUser(db, { username, password, displayName }): Promise<User>`, `authenticate(db, username, password): Promise<User | null>`, `countUsers(db): number`. Session user shape: `{ id: number, username: string, displayName: string }`. Routes: `POST /api/auth/setup` (only when 0 users), `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/status → { needsSetup: boolean, loggedIn: boolean }`.
+- Consumes: `createDataSource`/`useDb`, `User` entity (Task 2). `nuxt-auth-utils` provides `setUserSession`, `requireUserSession`, `getUserSession`, `clearUserSession`.
+- Produces: `createUser(db, { username, password, displayName }): Promise<User>`, `authenticate(db, username, password): Promise<User | null>`, `countUsers(db): Promise<number>`. Session user shape: `{ id: number, username: string, displayName: string }`. Routes: `POST /api/auth/setup` (only when 0 users), `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/status → { needsSetup: boolean, loggedIn: boolean }`.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/server/users.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { createUser, authenticate, countUsers } from '../../server/utils/users'
 
 describe('users', () => {
   it('creates a user and authenticates with correct password only', async () => {
-    const db = createDb(':memory:')
-    expect(countUsers(db)).toBe(0)
+    const db = await createDataSource(':memory:')
+    expect(await countUsers(db)).toBe(0)
     const u = await createUser(db, { username: 'jess', password: 'hunter22', displayName: 'Jess' })
     expect(u.username).toBe('jess')
     expect(u.passwordHash).not.toContain('hunter22')
-    expect(countUsers(db)).toBe(1)
+    expect(await countUsers(db)).toBe(1)
     expect(await authenticate(db, 'jess', 'hunter22')).toMatchObject({ username: 'jess' })
     expect(await authenticate(db, 'jess', 'wrong')).toBeNull()
     expect(await authenticate(db, 'nobody', 'x')).toBeNull()
+    await db.destroy()
   })
 })
 ```
@@ -337,8 +448,7 @@ Run: `npm test` — Expected: FAIL, `server/utils/users` not found.
 `server/utils/users.ts` — use `scrypt` from `node:crypto` directly so the util is testable outside Nitro (nuxt-auth-utils' `hashPassword` is only available in Nitro context):
 ```ts
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
-import { eq } from 'drizzle-orm'
-import { users, type User } from '../database/schema'
+import { User } from '../database/entities'
 import type { Db } from './db'
 
 export function hashPw(password: string): string {
@@ -353,22 +463,22 @@ export function verifyPw(password: string, stored: string): boolean {
 }
 
 export async function createUser(db: Db, input: { username: string; password: string; displayName: string }): Promise<User> {
-  const [u] = db.insert(users).values({
+  const repo = db.getRepository(User)
+  return repo.save(repo.create({
     username: input.username.trim().toLowerCase(),
     passwordHash: hashPw(input.password),
     displayName: input.displayName,
-  }).returning().all()
-  return u!
+  }))
 }
 
 export async function authenticate(db: Db, username: string, password: string): Promise<User | null> {
-  const u = db.select().from(users).where(eq(users.username, username.trim().toLowerCase())).get()
+  const u = await db.getRepository(User).findOneBy({ username: username.trim().toLowerCase() })
   if (!u || !verifyPw(password, u.passwordHash)) return null
   return u
 }
 
-export function countUsers(db: Db): number {
-  return db.select().from(users).all().length
+export async function countUsers(db: Db): Promise<number> {
+  return db.getRepository(User).count()
 }
 ```
 
@@ -394,7 +504,7 @@ export default defineEventHandler(async (event) => {
 import { countUsers } from '../../utils/users'
 export default defineEventHandler(async (event) => {
   const session = await getUserSession(event)
-  return { needsSetup: countUsers(useDb()) === 0, loggedIn: !!session.user }
+  return { needsSetup: (await countUsers(await useDb())) === 0, loggedIn: !!session.user }
 })
 ```
 
@@ -402,8 +512,8 @@ export default defineEventHandler(async (event) => {
 ```ts
 import { countUsers, createUser } from '../../utils/users'
 export default defineEventHandler(async (event) => {
-  const db = useDb()
-  if (countUsers(db) > 0) throw createError({ statusCode: 403, statusMessage: 'Setup already completed' })
+  const db = await useDb()
+  if (await countUsers(db) > 0) throw createError({ statusCode: 403, statusMessage: 'Setup already completed' })
   const body = await readBody<{ username: string; password: string; displayName: string }>(event)
   if (!body?.username || !body?.password || body.password.length < 8)
     throw createError({ statusCode: 400, statusMessage: 'Username and password (min 8 chars) required' })
@@ -418,7 +528,7 @@ export default defineEventHandler(async (event) => {
 import { authenticate } from '../../utils/users'
 export default defineEventHandler(async (event) => {
   const body = await readBody<{ username: string; password: string }>(event)
-  const u = await authenticate(useDb(), body?.username ?? '', body?.password ?? '')
+  const u = await authenticate(await useDb(), body?.username ?? '', body?.password ?? '')
   if (!u) throw createError({ statusCode: 401, statusMessage: 'Invalid credentials' })
   await setUserSession(event, { user: { id: u.id, username: u.username, displayName: u.displayName } })
   return { ok: true }
@@ -458,15 +568,15 @@ git add -A && git commit -m "feat: auth with first-run setup, login/logout, API 
 - Test: `tests/server/projects.test.ts`
 
 **Interfaces:**
-- Consumes: `createDb`/`useDb`, `projects` table.
-- Produces: `listId(status): 'backlog' | 'active' | 'done'` (backlog = idea/on_hold; active = researching/quoting/in_progress); `createProject(db, input): Project` (appends to bottom of its list); `updateProject(db, id, patch): Project` (status change across lists re-appends to bottom of target list); `reorderList(db, list: 'backlog'|'active', orderedIds: number[]): void`; `deleteProject(db, id): void` (cascades via FK; attachment file cleanup added in Task 7). Routes mirror these; `GET /api/projects` returns `{ backlog: Project[], active: Project[], done: Project[] }` each rank-ordered.
+- Consumes: `createDataSource`/`useDb`, `Project` entity.
+- Produces: `listId(status): 'backlog' | 'active' | 'done'` (sync/pure; backlog = idea/on_hold; active = researching/quoting/in_progress); `createProject(db, input): Promise<Project>` (appends to bottom of its list); `updateProject(db, id, patch): Promise<Project>` (status change across lists re-appends to bottom of target list); `reorderList(db, list: 'backlog'|'active', orderedIds: number[]): Promise<void>`; `listProjects(db): Promise<{ backlog, active, done }>`; `deleteProject(db, id): Promise<void>` (cascades via FK; attachment file cleanup added in Task 7). Routes mirror these; `GET /api/projects` returns `{ backlog: Project[], active: Project[], done: Project[] }` each rank-ordered.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/server/projects.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { createProject, updateProject, reorderList, listProjects, listId } from '../../server/utils/projects'
 
 describe('projects ranking', () => {
@@ -479,32 +589,35 @@ describe('projects ranking', () => {
     expect(listId('done')).toBe('done')
   })
 
-  it('appends new projects to the bottom of their list', () => {
-    const db = createDb(':memory:')
-    const a = createProject(db, { name: 'A', status: 'idea' })
-    const b = createProject(db, { name: 'B', status: 'idea' })
+  it('appends new projects to the bottom of their list', async () => {
+    const db = await createDataSource(':memory:')
+    const a = await createProject(db, { name: 'A', status: 'idea' })
+    const b = await createProject(db, { name: 'B', status: 'idea' })
     expect(b.rank).toBeGreaterThan(a.rank)
+    await db.destroy()
   })
 
-  it('moving Backlog→Active appends to bottom of Active', () => {
-    const db = createDb(':memory:')
-    const active1 = createProject(db, { name: 'Active1', status: 'quoting' })
-    const idea = createProject(db, { name: 'Idea', status: 'idea' })
-    const moved = updateProject(db, idea.id, { status: 'researching' })
+  it('moving Backlog→Active appends to bottom of Active', async () => {
+    const db = await createDataSource(':memory:')
+    const active1 = await createProject(db, { name: 'Active1', status: 'quoting' })
+    const idea = await createProject(db, { name: 'Idea', status: 'idea' })
+    const moved = await updateProject(db, idea.id, { status: 'researching' })
     expect(moved.rank).toBeGreaterThan(active1.rank)
-    const { active } = listProjects(db)
+    const { active } = await listProjects(db)
     expect(active.map(p => p.name)).toEqual(['Active1', 'Idea'])
+    await db.destroy()
   })
 
-  it('reorders a list without touching the other', () => {
-    const db = createDb(':memory:')
-    const i1 = createProject(db, { name: 'I1', status: 'idea' })
-    const i2 = createProject(db, { name: 'I2', status: 'idea' })
-    const a1 = createProject(db, { name: 'A1', status: 'in_progress' })
-    reorderList(db, 'backlog', [i2.id, i1.id])
-    const lists = listProjects(db)
+  it('reorders a list without touching the other', async () => {
+    const db = await createDataSource(':memory:')
+    const i1 = await createProject(db, { name: 'I1', status: 'idea' })
+    const i2 = await createProject(db, { name: 'I2', status: 'idea' })
+    const a1 = await createProject(db, { name: 'A1', status: 'in_progress' })
+    await reorderList(db, 'backlog', [i2.id, i1.id])
+    const lists = await listProjects(db)
     expect(lists.backlog.map(p => p.name)).toEqual(['I2', 'I1'])
     expect(lists.active.map(p => p.name)).toEqual(['A1'])
+    await db.destroy()
   })
 })
 ```
@@ -517,11 +630,11 @@ Run: `npm test` — Expected: FAIL, `server/utils/projects` not found.
 
 `server/utils/projects.ts`:
 ```ts
-import { eq, inArray, asc } from 'drizzle-orm'
-import { projects, type Project } from '../database/schema'
+import { In } from 'typeorm'
+import { Project, type ProjectStatusValue } from '../database/entities'
 import type { Db } from './db'
 
-export type ProjectStatus = Project['status']
+export type ProjectStatus = ProjectStatusValue
 export type ListName = 'backlog' | 'active' | 'done'
 
 const LIST_STATUSES: Record<ListName, ProjectStatus[]> = {
@@ -536,44 +649,44 @@ export function listId(status: ProjectStatus): ListName {
   return 'done'
 }
 
-function nextRank(db: Db, list: ListName): number {
-  const rows = db.select({ rank: projects.rank }).from(projects)
-    .where(inArray(projects.status, LIST_STATUSES[list])).all()
+async function nextRank(db: Db, list: ListName): Promise<number> {
+  const rows = await db.getRepository(Project).find({
+    where: { status: In(LIST_STATUSES[list]) },
+    select: { rank: true },
+  })
   return rows.length ? Math.max(...rows.map(r => r.rank)) + 1 : 1
 }
 
-export function createProject(db: Db, input: { name: string; description?: string; status?: ProjectStatus; createdBy?: number }): Project {
+export async function createProject(db: Db, input: { name: string; description?: string; status?: ProjectStatus; createdBy?: number }): Promise<Project> {
   const status = input.status ?? 'idea'
-  const [p] = db.insert(projects).values({
+  const repo = db.getRepository(Project)
+  return repo.save(repo.create({
     name: input.name,
     description: input.description ?? '',
     status,
-    rank: nextRank(db, listId(status)),
-    createdBy: input.createdBy,
-  }).returning().all()
-  return p!
+    rank: await nextRank(db, listId(status)),
+    createdBy: input.createdBy ?? null,
+  }))
 }
 
-export function updateProject(db: Db, id: number, patch: Partial<Pick<Project, 'name' | 'description' | 'status'>>): Project {
-  const existing = db.select().from(projects).where(eq(projects.id, id)).get()
+export async function updateProject(db: Db, id: number, patch: Partial<Pick<Project, 'name' | 'description' | 'status'>>): Promise<Project> {
+  const repo = db.getRepository(Project)
+  const existing = await repo.findOneBy({ id })
   if (!existing) throw createError({ statusCode: 404, statusMessage: 'Project not found' })
   let rank = existing.rank
   if (patch.status && listId(patch.status) !== listId(existing.status))
-    rank = nextRank(db, listId(patch.status))
-  const [p] = db.update(projects)
-    .set({ ...patch, rank, updatedAt: new Date().toISOString() })
-    .where(eq(projects.id, id)).returning().all()
-  return p!
+    rank = await nextRank(db, listId(patch.status))
+  return repo.save({ ...existing, ...patch, rank, updatedAt: new Date().toISOString() })
 }
 
-export function reorderList(db: Db, list: Exclude<ListName, 'done'>, orderedIds: number[]): void {
-  orderedIds.forEach((id, i) => {
-    db.update(projects).set({ rank: i + 1 }).where(eq(projects.id, id)).run()
-  })
+export async function reorderList(db: Db, list: Exclude<ListName, 'done'>, orderedIds: number[]): Promise<void> {
+  const repo = db.getRepository(Project)
+  for (let i = 0; i < orderedIds.length; i++)
+    await repo.update(orderedIds[i]!, { rank: i + 1 })
 }
 
-export function listProjects(db: Db): Record<ListName, Project[]> {
-  const all = db.select().from(projects).orderBy(asc(projects.rank)).all()
+export async function listProjects(db: Db): Promise<Record<ListName, Project[]>> {
+  const all = await db.getRepository(Project).find({ order: { rank: 'ASC' } })
   return {
     backlog: all.filter(p => listId(p.status) === 'backlog'),
     active: all.filter(p => listId(p.status) === 'active'),
@@ -581,8 +694,8 @@ export function listProjects(db: Db): Record<ListName, Project[]> {
   }
 }
 
-export function deleteProject(db: Db, id: number): void {
-  db.delete(projects).where(eq(projects.id, id)).run()
+export async function deleteProject(db: Db, id: number): Promise<void> {
+  await db.getRepository(Project).delete(id)
 }
 ```
 
@@ -601,7 +714,7 @@ Run: `npm test` — Expected: PASS (all projects tests green).
 `server/api/projects/index.get.ts`:
 ```ts
 import { listProjects } from '../../utils/projects'
-export default defineEventHandler(() => listProjects(useDb()))
+export default defineEventHandler(async () => listProjects(await useDb()))
 ```
 
 `server/api/projects/index.post.ts`:
@@ -611,17 +724,16 @@ export default defineEventHandler(async (event) => {
   const body = await readBody(event)
   if (!body?.name) throw createError({ statusCode: 400, statusMessage: 'Name required' })
   const session = await getUserSession(event)
-  return createProject(useDb(), { ...body, createdBy: (session.user as any)?.id })
+  return createProject(await useDb(), { ...body, createdBy: (session.user as any)?.id })
 })
 ```
 
 `server/api/projects/[id].get.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
-import { projects } from '../../database/schema'
-export default defineEventHandler((event) => {
+import { Project } from '../../database/entities'
+export default defineEventHandler(async (event) => {
   const id = Number(getRouterParam(event, 'id'))
-  const p = useDb().select().from(projects).where(eq(projects.id, id)).get()
+  const p = await (await useDb()).getRepository(Project).findOneBy({ id })
   if (!p) throw createError({ statusCode: 404, statusMessage: 'Project not found' })
   return p
 })
@@ -632,15 +744,15 @@ export default defineEventHandler((event) => {
 import { updateProject } from '../../utils/projects'
 export default defineEventHandler(async (event) => {
   const id = Number(getRouterParam(event, 'id'))
-  return updateProject(useDb(), id, await readBody(event))
+  return updateProject(await useDb(), id, await readBody(event))
 })
 ```
 
 `server/api/projects/[id].delete.ts`:
 ```ts
 import { deleteProject } from '../../utils/projects'
-export default defineEventHandler((event) => {
-  deleteProject(useDb(), Number(getRouterParam(event, 'id')))
+export default defineEventHandler(async (event) => {
+  await deleteProject(await useDb(), Number(getRouterParam(event, 'id')))
   return { ok: true }
 })
 ```
@@ -652,7 +764,7 @@ export default defineEventHandler(async (event) => {
   const body = await readBody<{ list: 'backlog' | 'active'; orderedIds: number[] }>(event)
   if (!body?.list || !Array.isArray(body.orderedIds))
     throw createError({ statusCode: 400, statusMessage: 'list and orderedIds required' })
-  reorderList(useDb(), body.list, body.orderedIds)
+  await reorderList(await useDb(), body.list, body.orderedIds)
   return { ok: true }
 })
 ```
@@ -674,14 +786,14 @@ git add -A && git commit -m "feat: projects CRUD with independent backlog/active
 
 **Interfaces:**
 - Consumes: `quotes` table, project routes (Task 4).
-- Produces: `isExpired(quote, now?: Date): boolean` (pending + validUntil past); `acceptedTotal(db, projectId): number`; quote CRUD via routes. **No DELETE route for quotes — deliberate.** `GET /api/projects/:id/quotes?includeDeclined=true` returns quotes each decorated with `expired: boolean`; declined excluded by default.
+- Produces: `isExpired(quote, now?: Date): boolean` (sync/pure; pending + validUntil past); `acceptedTotal(db, projectId): Promise<number>`; `listQuotes(db, projectId, opts?): Promise<(Quote & { expired })[]>`; quote CRUD (`createQuote`/`updateQuote`, both async) via routes. **No DELETE route for quotes — deliberate.** `GET /api/projects/:id/quotes?includeDeclined=true` returns quotes each decorated with `expired: boolean`; declined excluded by default.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/server/quotes.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { createProject } from '../../server/utils/projects'
 import { isExpired, acceptedTotal, listQuotes, createQuote, updateQuote } from '../../server/utils/quotes'
 
@@ -695,20 +807,21 @@ describe('quotes', () => {
     expect(isExpired({ status: 'pending', validUntil: null } as any, now)).toBe(false)
   })
 
-  it('sums accepted quotes; hides declined by default but keeps them revivable', () => {
-    const db = createDb(':memory:')
-    const p = createProject(db, { name: 'Mini split' })
-    const q1 = createQuote(db, { projectId: p.id, companyName: 'HVAC Co', amount: 8000 })
-    const q2 = createQuote(db, { projectId: p.id, companyName: 'Sparky', amount: 1500 })
-    const q3 = createQuote(db, { projectId: p.id, companyName: 'Overpriced Inc', amount: 15000 })
-    updateQuote(db, q1.id, { status: 'accepted' })
-    updateQuote(db, q2.id, { status: 'accepted' })
-    updateQuote(db, q3.id, { status: 'declined' })
-    expect(acceptedTotal(db, p.id)).toBe(9500)
-    expect(listQuotes(db, p.id).map(q => q.companyName)).toEqual(['HVAC Co', 'Sparky'])
-    expect(listQuotes(db, p.id, { includeDeclined: true })).toHaveLength(3)
-    const revived = updateQuote(db, q3.id, { status: 'pending' })
+  it('sums accepted quotes; hides declined by default but keeps them revivable', async () => {
+    const db = await createDataSource(':memory:')
+    const p = await createProject(db, { name: 'Mini split' })
+    const q1 = await createQuote(db, { projectId: p.id, companyName: 'HVAC Co', amount: 8000 })
+    const q2 = await createQuote(db, { projectId: p.id, companyName: 'Sparky', amount: 1500 })
+    const q3 = await createQuote(db, { projectId: p.id, companyName: 'Overpriced Inc', amount: 15000 })
+    await updateQuote(db, q1.id, { status: 'accepted' })
+    await updateQuote(db, q2.id, { status: 'accepted' })
+    await updateQuote(db, q3.id, { status: 'declined' })
+    expect(await acceptedTotal(db, p.id)).toBe(9500)
+    expect((await listQuotes(db, p.id)).map(q => q.companyName)).toEqual(['HVAC Co', 'Sparky'])
+    expect(await listQuotes(db, p.id, { includeDeclined: true })).toHaveLength(3)
+    const revived = await updateQuote(db, q3.id, { status: 'pending' })
     expect(revived.status).toBe('pending')
+    await db.destroy()
   })
 })
 ```
@@ -721,42 +834,43 @@ Run: `npm test` — Expected: FAIL, `server/utils/quotes` not found.
 
 `server/utils/quotes.ts`:
 ```ts
-import { eq, and, ne } from 'drizzle-orm'
-import { quotes, type Quote } from '../database/schema'
+import { Not } from 'typeorm'
+import { Quote } from '../database/entities'
 import type { Db } from './db'
+
+const createError = globalThis.createError ?? ((e: any) => Object.assign(new Error(e.statusMessage), e))
 
 export function isExpired(q: Pick<Quote, 'status' | 'validUntil'>, now = new Date()): boolean {
   return q.status === 'pending' && !!q.validUntil && new Date(q.validUntil) < now
 }
 
-export function createQuote(db: Db, input: { projectId: number; companyName: string; amount: number; contactInfo?: string; scopeNotes?: string; dateReceived?: string; validUntil?: string }): Quote {
-  const [q] = db.insert(quotes).values(input).returning().all()
-  return q!
+export async function createQuote(db: Db, input: { projectId: number; companyName: string; amount: number; contactInfo?: string; scopeNotes?: string; dateReceived?: string; validUntil?: string }): Promise<Quote> {
+  const repo = db.getRepository(Quote)
+  return repo.save(repo.create(input))
 }
 
-export function updateQuote(db: Db, id: number, patch: Partial<Omit<Quote, 'id' | 'projectId'>>): Quote {
-  const [q] = db.update(quotes).set(patch).where(eq(quotes.id, id)).returning().all()
-  if (!q) throw createError({ statusCode: 404, statusMessage: 'Quote not found' })
-  return q
+export async function updateQuote(db: Db, id: number, patch: Partial<Omit<Quote, 'id' | 'projectId'>>): Promise<Quote> {
+  const repo = db.getRepository(Quote)
+  const existing = await repo.findOneBy({ id })
+  if (!existing) throw createError({ statusCode: 404, statusMessage: 'Quote not found' })
+  return repo.save({ ...existing, ...patch })
 }
 
-export function listQuotes(db: Db, projectId: number, opts: { includeDeclined?: boolean } = {}): (Quote & { expired: boolean })[] {
+export async function listQuotes(db: Db, projectId: number, opts: { includeDeclined?: boolean } = {}): Promise<(Quote & { expired: boolean })[]> {
   const where = opts.includeDeclined
-    ? eq(quotes.projectId, projectId)
-    : and(eq(quotes.projectId, projectId), ne(quotes.status, 'declined'))
-  return db.select().from(quotes).where(where).all().map(q => ({ ...q, expired: isExpired(q) }))
+    ? { projectId }
+    : { projectId, status: Not('declined' as const) }
+  const rows = await db.getRepository(Quote).find({ where })
+  return rows.map(q => ({ ...q, expired: isExpired(q) }))
 }
 
-export function acceptedTotal(db: Db, projectId: number): number {
-  return db.select().from(quotes)
-    .where(and(eq(quotes.projectId, projectId), eq(quotes.status, 'accepted')))
-    .all().reduce((sum, q) => sum + q.amount, 0)
+export async function acceptedTotal(db: Db, projectId: number): Promise<number> {
+  const rows = await db.getRepository(Quote).findBy({ projectId, status: 'accepted' })
+  return rows.reduce((sum, q) => sum + q.amount, 0)
 }
-
-const createError = globalThis.createError ?? ((e: any) => Object.assign(new Error(e.statusMessage), e))
 ```
 
-(Hoist the `createError` guard above `updateQuote` — same pattern as Task 4.)
+(The `createError` guard sits at the top of the file so `updateQuote` can use it under Vitest — same pattern as Task 4.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -770,7 +884,7 @@ import { listQuotes } from '../../../utils/quotes'
 export default defineEventHandler((event) => {
   const projectId = Number(getRouterParam(event, 'id'))
   const includeDeclined = getQuery(event).includeDeclined === 'true'
-  return listQuotes(useDb(), projectId, { includeDeclined })
+  return listQuotes(await useDb(), projectId, { includeDeclined })
 })
 ```
 
@@ -781,7 +895,7 @@ export default defineEventHandler(async (event) => {
   const body = await readBody(event)
   if (!body?.projectId || !body?.companyName || typeof body.amount !== 'number')
     throw createError({ statusCode: 400, statusMessage: 'projectId, companyName, amount required' })
-  return createQuote(useDb(), body)
+  return createQuote(await useDb(), body)
 })
 ```
 
@@ -789,7 +903,7 @@ export default defineEventHandler(async (event) => {
 ```ts
 import { updateQuote } from '../../utils/quotes'
 export default defineEventHandler(async (event) =>
-  updateQuote(useDb(), Number(getRouterParam(event, 'id')), await readBody(event)))
+  updateQuote(await useDb(), Number(getRouterParam(event, 'id')), await readBody(event)))
 ```
 
 Do NOT create `server/api/quotes/[id].delete.ts` — quotes are declined, never deleted (spec).
@@ -813,33 +927,34 @@ git add -A && git commit -m "feat: quotes with derived expiry, declined-not-dele
 - Test: `tests/server/expenses.test.ts`
 
 **Interfaces:**
-- Consumes: tables from Task 2, `acceptedTotal` (Task 5).
-- Produces: `listExpenses(db, filter?: { projectId?, categoryId?, from?, to? }): Expense[]`; `expenseTotal(db, filter?): number`; `projectSpend(db, projectId): { spent: number, quoted: number }` (quoted = `acceptedTotal`). Routes: expenses CRUD (`GET /api/expenses` accepts `projectId`, `categoryId`, `from`, `to` query params), categories list/create, inventory CRUD, `GET/PATCH /api/settings` (singleton HouseholdSettings row id=1, fields `region`, `houseFacts`).
+- Consumes: entities from Task 2, `acceptedTotal` (Task 5).
+- Produces: `listExpenses(db, filter?: { projectId?, categoryId?, from?, to? }): Promise<Expense[]>`; `expenseTotal(db, filter?): Promise<number>`; `projectSpend(db, projectId): Promise<{ spent: number, quoted: number }>` (quoted = `acceptedTotal`). Routes: expenses CRUD (`GET /api/expenses` accepts `projectId`, `categoryId`, `from`, `to` query params), categories list/create, inventory CRUD, `GET/PATCH /api/settings` (singleton HouseholdSettings row id=1, fields `region`, `houseFacts`).
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/server/expenses.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { createProject } from '../../server/utils/projects'
 import { createQuote, updateQuote } from '../../server/utils/quotes'
 import { createExpense, listExpenses, expenseTotal, projectSpend } from '../../server/utils/expenses'
 
 describe('expenses', () => {
-  it('filters by project/date and totals; computes project spend vs quoted', () => {
-    const db = createDb(':memory:')
-    const p = createProject(db, { name: 'Mini split' })
-    const q = createQuote(db, { projectId: p.id, companyName: 'HVAC Co', amount: 8000 })
-    updateQuote(db, q.id, { status: 'accepted' })
-    createExpense(db, { projectId: p.id, amount: 4000, date: '2026-07-01', vendor: 'HVAC Co' })
-    createExpense(db, { projectId: p.id, amount: 30, date: '2026-07-10', vendor: 'Hardware store' })
-    createExpense(db, { amount: 120, date: '2026-07-05', vendor: 'Utility' }) // standalone
-    expect(listExpenses(db)).toHaveLength(3)
-    expect(listExpenses(db, { projectId: p.id })).toHaveLength(2)
-    expect(listExpenses(db, { from: '2026-07-04', to: '2026-07-11' })).toHaveLength(2)
-    expect(expenseTotal(db, { projectId: p.id })).toBe(4030)
-    expect(projectSpend(db, p.id)).toEqual({ spent: 4030, quoted: 8000 })
+  it('filters by project/date and totals; computes project spend vs quoted', async () => {
+    const db = await createDataSource(':memory:')
+    const p = await createProject(db, { name: 'Mini split' })
+    const q = await createQuote(db, { projectId: p.id, companyName: 'HVAC Co', amount: 8000 })
+    await updateQuote(db, q.id, { status: 'accepted' })
+    await createExpense(db, { projectId: p.id, amount: 4000, date: '2026-07-01', vendor: 'HVAC Co' })
+    await createExpense(db, { projectId: p.id, amount: 30, date: '2026-07-10', vendor: 'Hardware store' })
+    await createExpense(db, { amount: 120, date: '2026-07-05', vendor: 'Utility' }) // standalone
+    expect(await listExpenses(db)).toHaveLength(3)
+    expect(await listExpenses(db, { projectId: p.id })).toHaveLength(2)
+    expect(await listExpenses(db, { from: '2026-07-04', to: '2026-07-11' })).toHaveLength(2)
+    expect(await expenseTotal(db, { projectId: p.id })).toBe(4030)
+    expect(await projectSpend(db, p.id)).toEqual({ spent: 4030, quoted: 8000 })
+    await db.destroy()
   })
 })
 ```
@@ -852,39 +967,33 @@ Run: `npm test` — Expected: FAIL, `server/utils/expenses` not found.
 
 `server/utils/expenses.ts`:
 ```ts
-import { eq, and, gte, lte, type SQL } from 'drizzle-orm'
-import { expenses, type Expense } from '../database/schema'
+import { Expense } from '../database/entities'
 import { acceptedTotal } from './quotes'
 import type { Db } from './db'
 
 export type ExpenseFilter = { projectId?: number; categoryId?: number; from?: string; to?: string }
 
-function whereClause(filter: ExpenseFilter): SQL | undefined {
-  const conds: SQL[] = []
-  if (filter.projectId !== undefined) conds.push(eq(expenses.projectId, filter.projectId))
-  if (filter.categoryId !== undefined) conds.push(eq(expenses.categoryId, filter.categoryId))
-  if (filter.from) conds.push(gte(expenses.date, filter.from))
-  if (filter.to) conds.push(lte(expenses.date, filter.to))
-  return conds.length ? and(...conds) : undefined
+export async function createExpense(db: Db, input: { projectId?: number; categoryId?: number; amount: number; date: string; vendor?: string; note?: string }): Promise<Expense> {
+  const repo = db.getRepository(Expense)
+  return repo.save(repo.create(input))
 }
 
-export function createExpense(db: Db, input: { projectId?: number; categoryId?: number; amount: number; date: string; vendor?: string; note?: string }): Expense {
-  const [e] = db.insert(expenses).values(input).returning().all()
-  return e!
+export async function listExpenses(db: Db, filter: ExpenseFilter = {}): Promise<Expense[]> {
+  // QueryBuilder because from/to are two conditions on the same `date` column.
+  const qb = db.getRepository(Expense).createQueryBuilder('e')
+  if (filter.projectId !== undefined) qb.andWhere('e.projectId = :projectId', { projectId: filter.projectId })
+  if (filter.categoryId !== undefined) qb.andWhere('e.categoryId = :categoryId', { categoryId: filter.categoryId })
+  if (filter.from) qb.andWhere('e.date >= :from', { from: filter.from })
+  if (filter.to) qb.andWhere('e.date <= :to', { to: filter.to })
+  return qb.getMany()
 }
 
-export function listExpenses(db: Db, filter: ExpenseFilter = {}): Expense[] {
-  const w = whereClause(filter)
-  const q = db.select().from(expenses)
-  return (w ? q.where(w) : q).all()
+export async function expenseTotal(db: Db, filter: ExpenseFilter = {}): Promise<number> {
+  return (await listExpenses(db, filter)).reduce((s, e) => s + e.amount, 0)
 }
 
-export function expenseTotal(db: Db, filter: ExpenseFilter = {}): number {
-  return listExpenses(db, filter).reduce((s, e) => s + e.amount, 0)
-}
-
-export function projectSpend(db: Db, projectId: number): { spent: number; quoted: number } {
-  return { spent: expenseTotal(db, { projectId }), quoted: acceptedTotal(db, projectId) }
+export async function projectSpend(db: Db, projectId: number): Promise<{ spent: number; quoted: number }> {
+  return { spent: await expenseTotal(db, { projectId }), quoted: await acceptedTotal(db, projectId) }
 }
 ```
 
@@ -897,9 +1006,9 @@ Run: `npm test` — Expected: PASS.
 `server/api/expenses/index.get.ts`:
 ```ts
 import { listExpenses } from '../../utils/expenses'
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const q = getQuery(event)
-  return listExpenses(useDb(), {
+  return listExpenses(await useDb(), {
     projectId: q.projectId ? Number(q.projectId) : undefined,
     categoryId: q.categoryId ? Number(q.categoryId) : undefined,
     from: q.from as string | undefined,
@@ -915,69 +1024,65 @@ export default defineEventHandler(async (event) => {
   const body = await readBody(event)
   if (typeof body?.amount !== 'number' || !body?.date)
     throw createError({ statusCode: 400, statusMessage: 'amount and date required' })
-  return createExpense(useDb(), body)
+  return createExpense(await useDb(), body)
 })
 ```
 
 `server/api/expenses/[id].patch.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
-import { expenses } from '../../database/schema'
+import { Expense } from '../../database/entities'
 export default defineEventHandler(async (event) => {
   const id = Number(getRouterParam(event, 'id'))
-  const [e] = useDb().update(expenses).set(await readBody(event)).where(eq(expenses.id, id)).returning().all()
-  if (!e) throw createError({ statusCode: 404, statusMessage: 'Expense not found' })
-  return e
+  const repo = (await useDb()).getRepository(Expense)
+  const existing = await repo.findOneBy({ id })
+  if (!existing) throw createError({ statusCode: 404, statusMessage: 'Expense not found' })
+  return repo.save({ ...existing, ...(await readBody(event)) })
 })
 ```
 
 `server/api/expenses/[id].delete.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
-import { expenses } from '../../database/schema'
-export default defineEventHandler((event) => {
-  useDb().delete(expenses).where(eq(expenses.id, Number(getRouterParam(event, 'id')))).run()
+import { Expense } from '../../database/entities'
+export default defineEventHandler(async (event) => {
+  await (await useDb()).getRepository(Expense).delete(Number(getRouterParam(event, 'id')))
   return { ok: true }
 })
 ```
 
 `server/api/categories/index.get.ts`:
 ```ts
-import { categories } from '../../database/schema'
-export default defineEventHandler(() => useDb().select().from(categories).all())
+import { Category } from '../../database/entities'
+export default defineEventHandler(async () => (await useDb()).getRepository(Category).find())
 ```
 
 `server/api/categories/index.post.ts`:
 ```ts
-import { categories } from '../../database/schema'
+import { Category } from '../../database/entities'
 export default defineEventHandler(async (event) => {
   const body = await readBody<{ name: string }>(event)
   if (!body?.name?.trim()) throw createError({ statusCode: 400, statusMessage: 'name required' })
-  const [c] = useDb().insert(categories).values({ name: body.name.trim().toLowerCase() }).returning().all()
-  return c
+  const repo = (await useDb()).getRepository(Category)
+  return repo.save(repo.create({ name: body.name.trim().toLowerCase() }))
 })
 ```
 
-Inventory routes follow the identical CRUD pattern on `inventoryItems` (`server/api/inventory/index.get.ts` returns all rows; `index.post.ts` requires `name`; `[id].patch.ts` and `[id].delete.ts` mirror the expense routes with `inventoryItems` substituted — copy those two files and swap the table import and error message to 'Inventory item not found').
+Inventory routes follow the identical CRUD pattern on the `InventoryItem` entity (`server/api/inventory/index.get.ts` returns `getRepository(InventoryItem).find()`; `index.post.ts` requires `name` and does `repo.save(repo.create(body))`; `[id].patch.ts` and `[id].delete.ts` mirror the expense routes with `InventoryItem` substituted — copy those two files and swap the entity import and the error message to 'Inventory item not found').
 
 `server/api/settings.get.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
-import { householdSettings } from '../database/schema'
-export default defineEventHandler(() =>
-  useDb().select().from(householdSettings).where(eq(householdSettings.id, 1)).get())
+import { HouseholdSettings } from '../database/entities'
+export default defineEventHandler(async () =>
+  (await useDb()).getRepository(HouseholdSettings).findOneBy({ id: 1 }))
 ```
 
 `server/api/settings.patch.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
-import { householdSettings } from '../database/schema'
+import { HouseholdSettings } from '../database/entities'
 export default defineEventHandler(async (event) => {
   const body = await readBody<{ region?: string; houseFacts?: string }>(event)
-  const [s] = useDb().update(householdSettings)
-    .set({ region: body.region ?? '', houseFacts: body.houseFacts ?? '' })
-    .where(eq(householdSettings.id, 1)).returning().all()
-  return s
+  const repo = (await useDb()).getRepository(HouseholdSettings)
+  const existing = await repo.findOneBy({ id: 1 })
+  return repo.save({ ...existing, id: 1, region: body.region ?? '', houseFacts: body.houseFacts ?? '' })
 })
 ```
 
@@ -999,7 +1104,7 @@ git add -A && git commit -m "feat: expenses with filters/totals, categories, inv
 
 **Interfaces:**
 - Consumes: `attachments` table; `DATA_DIR/uploads` layout from Task 2.
-- Produces: `validateUpload(filename, mimeType, size): string | null` (returns error message or null; 25 MB cap; allow `application/pdf`, `image/*`, `text/plain`); `saveAttachment(db, uploadsDir, { ownerType, ownerId, filename, mimeType, data: Buffer }): Attachment`; `deleteAttachmentsFor(db, uploadsDir, ownerType, ownerId): void` (removes rows AND files); `deleteAttachment(db, uploadsDir, id): void`. Route `POST /api/attachments` takes multipart form data (fields: `ownerType`, `ownerId`, file); `GET /api/attachments?ownerType=quote&ownerId=5` lists; `GET /api/attachments/:id` streams the file with content-type.
+- Produces: `validateUpload(filename, mimeType, size): string | null` (sync; returns error message or null; 25 MB cap; allow `application/pdf`, `image/*`, `text/plain`); `saveAttachment(db, uploadsDir, { ownerType, ownerId, filename, mimeType, data: Buffer }): Promise<Attachment>`; `listAttachments(db, ownerType, ownerId): Promise<Attachment[]>`; `deleteAttachmentsFor(db, uploadsDir, ownerType, ownerId): Promise<void>` (removes rows AND files); `deleteAttachment(db, uploadsDir, id): Promise<void>`. Route `POST /api/attachments` takes multipart form data (fields: `ownerType`, `ownerId`, file); `GET /api/attachments?ownerType=quote&ownerId=5` lists; `GET /api/attachments/:id` streams the file with content-type.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1009,7 +1114,7 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { validateUpload, saveAttachment, deleteAttachmentsFor, listAttachments } from '../../server/utils/attachments'
 
 describe('attachments', () => {
@@ -1020,15 +1125,16 @@ describe('attachments', () => {
     expect(validateUpload('a.pdf', 'application/pdf', 26 * 1024 * 1024)).toMatch(/25 MB/i)
   })
 
-  it('saves file to disk and removes files on owner cleanup', () => {
-    const db = createDb(':memory:')
+  it('saves file to disk and removes files on owner cleanup', async () => {
+    const db = await createDataSource(':memory:')
     const dir = mkdtempSync(join(tmpdir(), 'uploads-'))
-    const a = saveAttachment(db, dir, { ownerType: 'quote', ownerId: 1, filename: 'quote.pdf', mimeType: 'application/pdf', data: Buffer.from('pdf!') })
+    const a = await saveAttachment(db, dir, { ownerType: 'quote', ownerId: 1, filename: 'quote.pdf', mimeType: 'application/pdf', data: Buffer.from('pdf!') })
     expect(existsSync(join(dir, a.diskPath))).toBe(true)
-    expect(listAttachments(db, 'quote', 1)).toHaveLength(1)
-    deleteAttachmentsFor(db, dir, 'quote', 1)
+    expect(await listAttachments(db, 'quote', 1)).toHaveLength(1)
+    await deleteAttachmentsFor(db, dir, 'quote', 1)
     expect(existsSync(join(dir, a.diskPath))).toBe(false)
-    expect(listAttachments(db, 'quote', 1)).toHaveLength(0)
+    expect(await listAttachments(db, 'quote', 1)).toHaveLength(0)
+    await db.destroy()
   })
 })
 ```
@@ -1044,13 +1150,12 @@ Run: `npm test` — Expected: FAIL, module not found.
 import { randomUUID } from 'node:crypto'
 import { writeFileSync, rmSync } from 'node:fs'
 import { join, extname } from 'node:path'
-import { eq, and } from 'drizzle-orm'
-import { attachments, type Attachment } from '../database/schema'
+import { Attachment, type OwnerTypeValue } from '../database/entities'
 import type { Db } from './db'
 
 const MAX_SIZE = 25 * 1024 * 1024
 const ALLOWED = (m: string) => m === 'application/pdf' || m === 'text/plain' || m.startsWith('image/')
-export type OwnerType = Attachment['ownerType']
+export type OwnerType = OwnerTypeValue
 
 export function validateUpload(filename: string, mimeType: string, size: number): string | null {
   if (!ALLOWED(mimeType)) return `File type ${mimeType} not allowed (pdf, images, txt only)`
@@ -1058,31 +1163,31 @@ export function validateUpload(filename: string, mimeType: string, size: number)
   return null
 }
 
-export function saveAttachment(db: Db, uploadsDir: string, input: { ownerType: OwnerType; ownerId: number; filename: string; mimeType: string; data: Buffer }): Attachment {
+export async function saveAttachment(db: Db, uploadsDir: string, input: { ownerType: OwnerType; ownerId: number; filename: string; mimeType: string; data: Buffer }): Promise<Attachment> {
   const diskPath = `${randomUUID()}${extname(input.filename)}`
   writeFileSync(join(uploadsDir, diskPath), input.data)
-  const [a] = db.insert(attachments).values({
+  const repo = db.getRepository(Attachment)
+  return repo.save(repo.create({
     ownerType: input.ownerType, ownerId: input.ownerId,
     filename: input.filename, mimeType: input.mimeType,
     size: input.data.length, diskPath,
-  }).returning().all()
-  return a!
+  }))
 }
 
-export function listAttachments(db: Db, ownerType: OwnerType, ownerId: number): Attachment[] {
-  return db.select().from(attachments)
-    .where(and(eq(attachments.ownerType, ownerType), eq(attachments.ownerId, ownerId))).all()
+export async function listAttachments(db: Db, ownerType: OwnerType, ownerId: number): Promise<Attachment[]> {
+  return db.getRepository(Attachment).findBy({ ownerType, ownerId })
 }
 
-export function deleteAttachment(db: Db, uploadsDir: string, id: number): void {
-  const a = db.select().from(attachments).where(eq(attachments.id, id)).get()
+export async function deleteAttachment(db: Db, uploadsDir: string, id: number): Promise<void> {
+  const repo = db.getRepository(Attachment)
+  const a = await repo.findOneBy({ id })
   if (!a) return
   rmSync(join(uploadsDir, a.diskPath), { force: true })
-  db.delete(attachments).where(eq(attachments.id, id)).run()
+  await repo.delete(id)
 }
 
-export function deleteAttachmentsFor(db: Db, uploadsDir: string, ownerType: OwnerType, ownerId: number): void {
-  for (const a of listAttachments(db, ownerType, ownerId)) deleteAttachment(db, uploadsDir, a.id)
+export async function deleteAttachmentsFor(db: Db, uploadsDir: string, ownerType: OwnerType, ownerId: number): Promise<void> {
+  for (const a of await listAttachments(db, ownerType, ownerId)) await deleteAttachment(db, uploadsDir, a.id)
 }
 ```
 
@@ -1115,29 +1220,28 @@ export default defineEventHandler(async (event) => {
   const mimeType = file.type ?? 'application/octet-stream'
   const err = validateUpload(file.filename, mimeType, file.data.length)
   if (err) throw createError({ statusCode: 400, statusMessage: err })
-  return saveAttachment(useDb(), uploadsDir(), { ownerType, ownerId, filename: file.filename, mimeType, data: file.data })
+  return saveAttachment(await useDb(), uploadsDir(), { ownerType, ownerId, filename: file.filename, mimeType, data: file.data })
 })
 ```
 
 `server/api/attachments/index.get.ts`:
 ```ts
 import { listAttachments, type OwnerType } from '../../utils/attachments'
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const q = getQuery(event)
-  return listAttachments(useDb(), q.ownerType as OwnerType, Number(q.ownerId))
+  return listAttachments(await useDb(), q.ownerType as OwnerType, Number(q.ownerId))
 })
 ```
 
 `server/api/attachments/[id].get.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
 import { createReadStream } from 'node:fs'
 import { join } from 'node:path'
-import { attachments } from '../../database/schema'
+import { Attachment } from '../../database/entities'
 import { uploadsDir } from '../../utils/uploads'
-export default defineEventHandler((event) => {
-  const a = useDb().select().from(attachments)
-    .where(eq(attachments.id, Number(getRouterParam(event, 'id')))).get()
+export default defineEventHandler(async (event) => {
+  const a = await (await useDb()).getRepository(Attachment)
+    .findOneBy({ id: Number(getRouterParam(event, 'id')) })
   if (!a) throw createError({ statusCode: 404, statusMessage: 'Attachment not found' })
   setHeader(event, 'content-type', a.mimeType)
   setHeader(event, 'content-disposition', `inline; filename="${a.filename.replace(/"/g, '')}"`)
@@ -1149,32 +1253,31 @@ export default defineEventHandler((event) => {
 ```ts
 import { deleteAttachment } from '../../utils/attachments'
 import { uploadsDir } from '../../utils/uploads'
-export default defineEventHandler((event) => {
-  deleteAttachment(useDb(), uploadsDir(), Number(getRouterParam(event, 'id')))
+export default defineEventHandler(async (event) => {
+  await deleteAttachment(await useDb(), uploadsDir(), Number(getRouterParam(event, 'id')))
   return { ok: true }
 })
 ```
 
 Wire cascade file cleanup — in `server/api/projects/[id].delete.ts`, before `deleteProject`, delete attachment files for the project, its quotes, and its expenses:
 ```ts
-import { eq } from 'drizzle-orm'
 import { deleteProject } from '../../utils/projects'
 import { deleteAttachmentsFor } from '../../utils/attachments'
 import { uploadsDir } from '../../utils/uploads'
-import { quotes, expenses } from '../../database/schema'
-export default defineEventHandler((event) => {
-  const db = useDb(); const dir = uploadsDir()
+import { Quote, Expense } from '../../database/entities'
+export default defineEventHandler(async (event) => {
+  const db = await useDb(); const dir = uploadsDir()
   const id = Number(getRouterParam(event, 'id'))
-  for (const q of db.select().from(quotes).where(eq(quotes.projectId, id)).all())
-    deleteAttachmentsFor(db, dir, 'quote', q.id)
-  for (const e of db.select().from(expenses).where(eq(expenses.projectId, id)).all())
-    deleteAttachmentsFor(db, dir, 'expense', e.id)
-  deleteAttachmentsFor(db, dir, 'project', id)
-  deleteProject(db, id)
+  for (const q of await db.getRepository(Quote).findBy({ projectId: id }))
+    await deleteAttachmentsFor(db, dir, 'quote', q.id)
+  for (const e of await db.getRepository(Expense).findBy({ projectId: id }))
+    await deleteAttachmentsFor(db, dir, 'expense', e.id)
+  await deleteAttachmentsFor(db, dir, 'project', id)
+  await deleteProject(db, id)
   return { ok: true }
 })
 ```
-Similarly add `deleteAttachmentsFor(db, uploadsDir(), 'expense', id)` before the row delete in `server/api/expenses/[id].delete.ts`, and `'inventory_item'` in the inventory delete route.
+Similarly add `await deleteAttachmentsFor(db, uploadsDir(), 'expense', id)` before the row delete in `server/api/expenses/[id].delete.ts` (capture `const db = await useDb()` there), and `'inventory_item'` in the inventory delete route.
 
 - [ ] **Step 6: Run all tests, commit**
 
@@ -1193,20 +1296,19 @@ git add -A && git commit -m "feat: attachments with validation, streaming, casca
 - Test: `tests/server/research.test.ts`
 
 **Interfaces:**
-- Consumes: `researchReports`, `projects`, `householdSettings`, `quotes` tables; OpenAI SDK.
-- Produces: `buildResearchPrompt(project, settings, quotes): string`; `runResearch(db, projectId, opts: { client, model, timeoutMs? }): Promise<ResearchReport>` (creates pending row, calls model, marks complete/failed; default timeout 5 min); `sweepOrphanedReports(db): number` (pending → failed "interrupted by restart", returns count). Routes: `POST /api/projects/:id/research` (fire-and-forget, returns pending report row), `GET /api/projects/:id/research` (all reports, newest first — the UI polls this).
+- Consumes: `ResearchReport`, `Project`, `HouseholdSettings`, `Quote` entities; OpenAI SDK.
+- Produces: `buildResearchPrompt(project, settings, quotes): string` (sync/pure); `runResearch(db, projectId, opts: { client, model, timeoutMs? }): Promise<ResearchReport>` (creates pending row, calls model, marks complete/failed; default timeout 5 min); `sweepOrphanedReports(db): Promise<number>` (pending → failed "interrupted by restart", returns count); `listReports(db, projectId): Promise<ResearchReport[]>`. Routes: `POST /api/projects/:id/research` (fire-and-forget, returns pending report row), `GET /api/projects/:id/research` (all reports, newest first — the UI polls this).
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/server/research.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { createProject } from '../../server/utils/projects'
 import { createQuote } from '../../server/utils/quotes'
 import { buildResearchPrompt, runResearch, sweepOrphanedReports } from '../../server/utils/research'
-import { researchReports, householdSettings } from '../../server/database/schema'
-import { eq } from 'drizzle-orm'
+import { ResearchReport, HouseholdSettings } from '../../server/database/entities'
 
 function fakeClient(reply: string | Error) {
   return {
@@ -1218,23 +1320,24 @@ function fakeClient(reply: string | Error) {
 }
 
 describe('research', () => {
-  it('builds a prompt containing project, region, and quotes', () => {
-    const db = createDb(':memory:')
-    const p = createProject(db, { name: 'Mini split install', description: 'Addition, no ductwork' })
-    createQuote(db, { projectId: p.id, companyName: 'HVAC Co', amount: 8000 })
-    db.update(householdSettings).set({ region: 'Boston, MA' }).where(eq(householdSettings.id, 1)).run()
-    const settings = db.select().from(householdSettings).where(eq(householdSettings.id, 1)).get()!
+  it('builds a prompt containing project, region, and quotes', async () => {
+    const db = await createDataSource(':memory:')
+    const p = await createProject(db, { name: 'Mini split install', description: 'Addition, no ductwork' })
+    await createQuote(db, { projectId: p.id, companyName: 'HVAC Co', amount: 8000 })
+    await db.getRepository(HouseholdSettings).update({ id: 1 }, { region: 'Boston, MA' })
+    const settings = (await db.getRepository(HouseholdSettings).findOneBy({ id: 1 }))!
     const quotes = [{ companyName: 'HVAC Co', amount: 8000, scopeNotes: '', status: 'pending' }] as any
     const prompt = buildResearchPrompt(p, settings, quotes)
     expect(prompt).toContain('Mini split install')
     expect(prompt).toContain('Boston, MA')
     expect(prompt).toContain('HVAC Co')
     expect(prompt).toContain('8000')
+    await db.destroy()
   })
 
   it('marks report complete on success and failed on error', async () => {
-    const db = createDb(':memory:')
-    const p = createProject(db, { name: 'Mini split' })
+    const db = await createDataSource(':memory:')
+    const p = await createProject(db, { name: 'Mini split' })
     const ok = await runResearch(db, p.id, { client: fakeClient('# Report\nCosts...'), model: 'test-model' })
     expect(ok.status).toBe('complete')
     expect(ok.body).toContain('Costs')
@@ -1242,16 +1345,19 @@ describe('research', () => {
     const bad = await runResearch(db, p.id, { client: fakeClient(new Error('rate limited')), model: 'test-model' })
     expect(bad.status).toBe('failed')
     expect(bad.error).toContain('rate limited')
+    await db.destroy()
   })
 
-  it('sweeps orphaned pending reports to failed', () => {
-    const db = createDb(':memory:')
-    const p = createProject(db, { name: 'X' })
-    db.insert(researchReports).values({ projectId: p.id, status: 'pending' }).run()
-    expect(sweepOrphanedReports(db)).toBe(1)
-    const r = db.select().from(researchReports).all()[0]!
+  it('sweeps orphaned pending reports to failed', async () => {
+    const db = await createDataSource(':memory:')
+    const p = await createProject(db, { name: 'X' })
+    const repo = db.getRepository(ResearchReport)
+    await repo.save(repo.create({ projectId: p.id, status: 'pending' }))
+    expect(await sweepOrphanedReports(db)).toBe(1)
+    const r = (await repo.find())[0]!
     expect(r.status).toBe('failed')
     expect(r.error).toMatch(/interrupted by restart/i)
+    await db.destroy()
   })
 })
 ```
@@ -1264,8 +1370,7 @@ Run: `npm test` — Expected: FAIL, module not found.
 
 `server/utils/research.ts`:
 ```ts
-import { eq, desc } from 'drizzle-orm'
-import { researchReports, projects, householdSettings, quotes as quotesTable, type ResearchReport, type Project, type Quote } from '../database/schema'
+import { ResearchReport, Project, HouseholdSettings, Quote } from '../database/entities'
 import type { Db } from './db'
 
 type Settings = { region: string; houseFacts: string }
@@ -1287,16 +1392,15 @@ export function buildResearchPrompt(project: Project, settings: Settings, quotes
 const DEFAULT_TIMEOUT = 5 * 60 * 1000
 
 export async function runResearch(db: Db, projectId: number, opts: { client: any; model: string; timeoutMs?: number }): Promise<ResearchReport> {
-  const project = db.select().from(projects).where(eq(projects.id, projectId)).get()
+  const project = await db.getRepository(Project).findOneBy({ id: projectId })
   if (!project) throw new Error('Project not found')
-  const settings = db.select().from(householdSettings).where(eq(householdSettings.id, 1)).get()!
-  const projectQuotes = db.select().from(quotesTable).where(eq(quotesTable.projectId, projectId)).all()
+  const settings = (await db.getRepository(HouseholdSettings).findOneBy({ id: 1 }))!
+  const projectQuotes = await db.getRepository(Quote).findBy({ projectId })
 
-  const [report] = db.insert(researchReports)
-    .values({ projectId, status: 'pending', model: opts.model }).returning().all()
+  const repo = db.getRepository(ResearchReport)
+  const report = await repo.save(repo.create({ projectId, status: 'pending', model: opts.model }))
 
-  const finish = (patch: Partial<ResearchReport>) =>
-    db.update(researchReports).set(patch).where(eq(researchReports.id, report!.id)).returning().all()[0]!
+  const finish = (patch: Partial<ResearchReport>) => repo.save({ ...report, ...patch })
 
   try {
     const completion = await Promise.race([
@@ -1314,16 +1418,16 @@ export async function runResearch(db: Db, projectId: number, opts: { client: any
   }
 }
 
-export function sweepOrphanedReports(db: Db): number {
-  return db.update(researchReports)
-    .set({ status: 'failed', error: 'interrupted by restart' })
-    .where(eq(researchReports.status, 'pending')).returning().all().length
+export async function sweepOrphanedReports(db: Db): Promise<number> {
+  const res = await db.getRepository(ResearchReport).update(
+    { status: 'pending' },
+    { status: 'failed', error: 'interrupted by restart' },
+  )
+  return res.affected ?? 0
 }
 
-export function listReports(db: Db, projectId: number): ResearchReport[] {
-  return db.select().from(researchReports)
-    .where(eq(researchReports.projectId, projectId))
-    .orderBy(desc(researchReports.id)).all()
+export async function listReports(db: Db, projectId: number): Promise<ResearchReport[]> {
+  return db.getRepository(ResearchReport).find({ where: { projectId }, order: { id: 'DESC' } })
 }
 ```
 
@@ -1337,15 +1441,15 @@ Run: `npm test` — Expected: PASS. (Timeout path is covered implicitly by the e
 ```ts
 import OpenAI from 'openai'
 import { runResearch } from '../../../utils/research'
-export default defineEventHandler((event) => {
+export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig()
   if (!config.openrouterApiKey || !config.researchModel)
     throw createError({ statusCode: 503, statusMessage: 'Research not configured: set NUXT_OPENROUTER_API_KEY and NUXT_RESEARCH_MODEL' })
   const client = new OpenAI({ baseURL: 'https://openrouter.ai/api/v1', apiKey: config.openrouterApiKey })
   const projectId = Number(getRouterParam(event, 'id'))
-  // Fire and forget: runResearch creates the pending row synchronously enough to poll,
-  // but we return immediately and let it finish in the background.
-  const promise = runResearch(useDb(), projectId, { client, model: config.researchModel })
+  const db = await useDb()
+  // Fire and forget: return immediately and let generation finish in the background.
+  const promise = runResearch(db, projectId, { client, model: config.researchModel })
   promise.catch(() => {}) // failures are persisted on the row
   return { started: true }
 })
@@ -1354,15 +1458,15 @@ export default defineEventHandler((event) => {
 `server/api/projects/[id]/research.get.ts`:
 ```ts
 import { listReports } from '../../../utils/research'
-export default defineEventHandler((event) =>
-  listReports(useDb(), Number(getRouterParam(event, 'id'))))
+export default defineEventHandler(async (event) =>
+  listReports(await useDb(), Number(getRouterParam(event, 'id'))))
 ```
 
 `server/plugins/research-sweep.ts`:
 ```ts
 import { sweepOrphanedReports } from '../utils/research'
-export default defineNitroPlugin(() => {
-  const n = sweepOrphanedReports(useDb())
+export default defineNitroPlugin(async () => {
+  const n = await sweepOrphanedReports(await useDb())
   if (n > 0) console.log(`[research] marked ${n} orphaned pending report(s) as failed`)
 })
 ```
@@ -1536,7 +1640,7 @@ git add -A && git commit -m "feat: login/setup pages, global auth middleware, si
 `app/components/ProjectList.vue`:
 ```vue
 <script setup lang="ts">
-import type { Project } from '~~/server/database/schema'
+import type { Project } from '~~/server/database/entities'
 const props = defineProps<{ projects: Project[]; draggable?: boolean }>()
 const emit = defineEmits<{ reorder: [orderedIds: number[]] }>()
 const dragIndex = ref<number | null>(null)
@@ -1673,8 +1777,8 @@ git add -A && git commit -m "feat: projects page with backlog/active sections an
 `server/api/projects/[id]/spend.get.ts`:
 ```ts
 import { projectSpend } from '../../../utils/expenses'
-export default defineEventHandler((event) =>
-  projectSpend(useDb(), Number(getRouterParam(event, 'id'))))
+export default defineEventHandler(async (event) =>
+  projectSpend(await useDb(), Number(getRouterParam(event, 'id'))))
 ```
 
 - [ ] **Step 2: Write failing component test for QuoteTable**
@@ -2035,9 +2139,9 @@ git add -A && git commit -m "feat: research panel with polling and markdown rend
 
 `server/api/users/index.get.ts`:
 ```ts
-import { users } from '../../database/schema'
-export default defineEventHandler(() =>
-  useDb().select({ id: users.id, username: users.username, displayName: users.displayName }).from(users).all())
+import { User } from '../../database/entities'
+export default defineEventHandler(async () =>
+  (await useDb()).getRepository(User).find({ select: { id: true, username: true, displayName: true } }))
 ```
 
 `server/api/users/index.post.ts`:
@@ -2047,23 +2151,22 @@ export default defineEventHandler(async (event) => {
   const body = await readBody<{ username: string; password: string; displayName: string }>(event)
   if (!body?.username || !body?.password || body.password.length < 8)
     throw createError({ statusCode: 400, statusMessage: 'Username and password (min 8 chars) required' })
-  const u = await createUser(useDb(), { ...body, displayName: body.displayName || body.username })
+  const u = await createUser(await useDb(), { ...body, displayName: body.displayName || body.username })
   return { id: u.id, username: u.username, displayName: u.displayName }
 })
 ```
 
 `server/api/users/[id]/password.post.ts`:
 ```ts
-import { eq } from 'drizzle-orm'
-import { users } from '../../../database/schema'
+import { User } from '../../../database/entities'
 import { hashPw } from '../../../utils/users'
 export default defineEventHandler(async (event) => {
   const body = await readBody<{ password: string }>(event)
   if (!body?.password || body.password.length < 8)
     throw createError({ statusCode: 400, statusMessage: 'Password min 8 chars' })
   const id = Number(getRouterParam(event, 'id'))
-  const res = useDb().update(users).set({ passwordHash: hashPw(body.password) }).where(eq(users.id, id)).returning().all()
-  if (!res.length) throw createError({ statusCode: 404, statusMessage: 'User not found' })
+  const res = await (await useDb()).getRepository(User).update(id, { passwordHash: hashPw(body.password) })
+  if (!res.affected) throw createError({ statusCode: 404, statusMessage: 'User not found' })
   return { ok: true }
 })
 ```
@@ -2313,35 +2416,37 @@ git add -A && git commit -m "feat: expenses, inventory, settings pages with acco
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `dashboardData(db, now?: Date)` in `server/utils/dashboard.ts` returning `{ active: Project[], backlog: Project[], recentExpenses: Expense[], expiringQuotes: (Quote & { projectName: string })[], expiringWarranties: InventoryItem[] }` — expiring quotes = `pending` with validUntil within 14 days (not yet past); warranties = expiry within 60 days (not yet past); recentExpenses = latest 10 by date. Route `GET /api/dashboard`.
+- Produces: `dashboardData(db, now?: Date)` (async) in `server/utils/dashboard.ts` resolving to `{ active: Project[], backlog: Project[], recentExpenses: Expense[], expiringQuotes: (Quote & { projectName: string })[], expiringWarranties: InventoryItem[] }` — expiring quotes = `pending` with validUntil within 14 days (not yet past); warranties = expiry within 60 days (not yet past); recentExpenses = latest 10 by date. Route `GET /api/dashboard`.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/server/dashboard.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest'
-import { createDb } from '../../server/utils/db'
+import { createDataSource } from '../../server/database/data-source'
 import { createProject } from '../../server/utils/projects'
 import { createQuote } from '../../server/utils/quotes'
 import { dashboardData } from '../../server/utils/dashboard'
-import { inventoryItems } from '../../server/database/schema'
+import { InventoryItem } from '../../server/database/entities'
 
 describe('dashboard', () => {
   const now = new Date('2026-07-12T00:00:00Z')
 
-  it('surfaces quotes expiring within 14 days and warranties within 60', () => {
-    const db = createDb(':memory:')
-    const p = createProject(db, { name: 'Mini split', status: 'quoting' })
-    createQuote(db, { projectId: p.id, companyName: 'Soon', amount: 1, validUntil: '2026-07-20' })    // in 8 days → included
-    createQuote(db, { projectId: p.id, companyName: 'Far', amount: 1, validUntil: '2026-09-01' })     // too far → excluded
-    createQuote(db, { projectId: p.id, companyName: 'Past', amount: 1, validUntil: '2026-07-01' })    // already expired → excluded
-    db.insert(inventoryItems).values({ name: 'Fridge', warrantyExpiry: '2026-08-15' }).run()  // in 34 days → included
-    db.insert(inventoryItems).values({ name: 'Oven', warrantyExpiry: '2027-01-01' }).run()    // too far → excluded
-    const d = dashboardData(db, now)
+  it('surfaces quotes expiring within 14 days and warranties within 60', async () => {
+    const db = await createDataSource(':memory:')
+    const p = await createProject(db, { name: 'Mini split', status: 'quoting' })
+    await createQuote(db, { projectId: p.id, companyName: 'Soon', amount: 1, validUntil: '2026-07-20' })    // in 8 days → included
+    await createQuote(db, { projectId: p.id, companyName: 'Far', amount: 1, validUntil: '2026-09-01' })     // too far → excluded
+    await createQuote(db, { projectId: p.id, companyName: 'Past', amount: 1, validUntil: '2026-07-01' })    // already expired → excluded
+    const inv = db.getRepository(InventoryItem)
+    await inv.save(inv.create({ name: 'Fridge', warrantyExpiry: '2026-08-15' }))  // in 34 days → included
+    await inv.save(inv.create({ name: 'Oven', warrantyExpiry: '2027-01-01' }))    // too far → excluded
+    const d = await dashboardData(db, now)
     expect(d.expiringQuotes.map(q => q.companyName)).toEqual(['Soon'])
     expect(d.expiringQuotes[0]!.projectName).toBe('Mini split')
     expect(d.expiringWarranties.map(i => i.name)).toEqual(['Fridge'])
     expect(d.active.map(p2 => p2.name)).toEqual(['Mini split'])
+    await db.destroy()
   })
 })
 ```
@@ -2354,8 +2459,7 @@ Run: `npm test` — Expected: FAIL, module not found.
 
 `server/utils/dashboard.ts`:
 ```ts
-import { eq, inArray, desc } from 'drizzle-orm'
-import { projects, quotes, expenses, inventoryItems, type Project, type Quote, type Expense, type InventoryItem } from '../database/schema'
+import { Project, Quote, Expense, InventoryItem } from '../database/entities'
 import { listProjects } from './projects'
 import type { Db } from './db'
 
@@ -2367,15 +2471,15 @@ function withinDays(dateStr: string | null, days: number, now: Date): boolean {
   return diff >= 0 && diff <= days * DAY
 }
 
-export function dashboardData(db: Db, now = new Date()) {
-  const lists = listProjects(db)
-  const nameById = new Map(db.select().from(projects).all().map(p => [p.id, p.name]))
-  const expiringQuotes = db.select().from(quotes).where(eq(quotes.status, 'pending')).all()
+export async function dashboardData(db: Db, now = new Date()) {
+  const lists = await listProjects(db)
+  const nameById = new Map((await db.getRepository(Project).find()).map(p => [p.id, p.name]))
+  const expiringQuotes = (await db.getRepository(Quote).findBy({ status: 'pending' }))
     .filter(q => withinDays(q.validUntil, 14, now))
     .map(q => ({ ...q, projectName: nameById.get(q.projectId) ?? '' }))
-  const expiringWarranties = db.select().from(inventoryItems).all()
+  const expiringWarranties = (await db.getRepository(InventoryItem).find())
     .filter(i => withinDays(i.warrantyExpiry, 60, now))
-  const recentExpenses = db.select().from(expenses).orderBy(desc(expenses.date)).limit(10).all()
+  const recentExpenses = await db.getRepository(Expense).find({ order: { date: 'DESC' }, take: 10 })
   return { active: lists.active, backlog: lists.backlog, recentExpenses, expiringQuotes, expiringWarranties }
 }
 ```
@@ -2383,7 +2487,7 @@ export function dashboardData(db: Db, now = new Date()) {
 `server/api/dashboard.get.ts`:
 ```ts
 import { dashboardData } from '../utils/dashboard'
-export default defineEventHandler(() => dashboardData(useDb()))
+export default defineEventHandler(async () => dashboardData(await useDb()))
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -2545,5 +2649,6 @@ git add -A && git commit -m "feat: dockerfile, password-reset CLI, README"
 ## Self-Review Notes
 
 - **Spec coverage:** projects+ranking (T4/T10), quotes+expiry+declined (T5/T11), expenses+categories (T6/T13), inventory+warranty badges (T6/T13), household settings (T6/T13), research+sweep+timeout (T8/T12), auth+no-roles+CLI reset (T3/T9/T13/T15), attachments+limits+cascade (T7), dashboard windows 14/60 days (T14), Docker/volume/env (T15). Chat assistant correctly absent (out of scope); research context-building isolated in `buildResearchPrompt` for future reuse.
-- **Type consistency:** `createDb(path)` / `useDb()` used throughout; `Db` type from `server/utils/db`; quote status strings match schema enums; `ownerType` values match the attachment enum.
-- **Known judgment calls baked in:** hand-maintained DDL instead of drizzle-kit migrations (single-schema app, revisit if schema churns); scrypt via node:crypto instead of nuxt-auth-utils hashPassword (testability outside Nitro); native HTML drag events instead of a DnD library (YAGNI).
+- **Type consistency:** `createDataSource(path): Promise<DataSource>` / `useDb(): Promise<DataSource>` used throughout; `Db = DataSource` type from `server/utils/db`; entity classes double as types under their original names (`Project`, `Quote`, …); all data-access utils and their tests are `async`/`await`; quote/project/report status strings match the entity union types; `ownerType` values match the attachment union.
+- **Known judgment calls baked in:** persistence is TypeORM with a hand-authored initial migration + `migrationsRun` on initialize (`synchronize` OFF everywhere; future migrations generated via the CLI against a live dev DB); explicit `@Column('text'|'integer'|'real')` types because esbuild/Vite/Nitro don't emit `emitDecoratorMetadata`; ISO-8601 timestamps set via `@BeforeInsert` hooks rather than DB defaults; FK cascade enforced by migration DDL + `PRAGMA foreign_keys = ON` in `prepareDatabase`; scrypt via node:crypto instead of nuxt-auth-utils hashPassword (testability outside Nitro); native HTML drag events instead of a DnD library (YAGNI).
+- **Drizzle references remaining:** only Task 1 (already merged: its scaffold commands + commit message record the original drizzle install) and Task 2's explicit uninstall/discard instructions — both intentional history, not live code.
