@@ -6,7 +6,16 @@ export type ExpenseFilter = { projectId?: number; categoryId?: number; from?: st
 
 export async function createExpense(db: Db, input: { projectId?: number; categoryId?: number; amount: number; date: string; vendor?: string; note?: string }): Promise<Expense> {
   const repo = db.getRepository(Expense)
-  return repo.save(repo.create(input))
+  // Whitelist fields at runtime — TS types erase, and a stray `id` in the
+  // input would make save() upsert over an existing row.
+  return repo.save(repo.create({
+    amount: input.amount,
+    date: input.date,
+    ...(input.projectId !== undefined && { projectId: input.projectId }),
+    ...(input.categoryId !== undefined && { categoryId: input.categoryId }),
+    ...(input.vendor !== undefined && { vendor: input.vendor }),
+    ...(input.note !== undefined && { note: input.note }),
+  }))
 }
 
 export async function listExpenses(db: Db, filter: ExpenseFilter = {}): Promise<Expense[]> {

@@ -19,7 +19,17 @@ export function isExpired(q: Pick<Quote, 'status' | 'validUntil'>, now = new Dat
 
 export async function createQuote(db: Db, input: { projectId: number; companyName: string; amount: number; contactInfo?: string; scopeNotes?: string; dateReceived?: string; validUntil?: string }): Promise<Quote> {
   const repo = db.getRepository(Quote)
-  return repo.save(repo.create(input))
+  // Whitelist fields at runtime — TS types erase, and a stray `id` in the
+  // input would make save() upsert over an existing row.
+  return repo.save(repo.create({
+    projectId: input.projectId,
+    companyName: input.companyName,
+    amount: input.amount,
+    ...(input.contactInfo !== undefined && { contactInfo: input.contactInfo }),
+    ...(input.scopeNotes !== undefined && { scopeNotes: input.scopeNotes }),
+    ...(input.dateReceived !== undefined && { dateReceived: input.dateReceived }),
+    ...(input.validUntil !== undefined && { validUntil: input.validUntil }),
+  }))
 }
 
 export async function updateQuote(db: Db, id: number, patch: Partial<Omit<Quote, 'id' | 'projectId'>>): Promise<Quote> {
