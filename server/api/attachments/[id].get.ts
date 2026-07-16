@@ -1,0 +1,14 @@
+import { createReadStream } from 'node:fs'
+import { join } from 'node:path'
+import { Attachment } from '../../database/entities'
+import { uploadsDir } from '../../utils/uploads'
+export default defineEventHandler(async (event) => {
+  const attachment = await (await useDb()).getRepository(Attachment)
+    .findOneBy({ id: Number(getRouterParam(event, 'id')) })
+  if (!attachment) throw createError({ statusCode: 404, statusMessage: 'Attachment not found' })
+  setHeader(event, 'content-type', attachment.mimeType)
+  setHeader(event, 'content-disposition', `inline; filename="${attachment.filename.replace(/"/g, '')}"`)
+  // attachment.diskPath is server-generated at save time (see saveAttachment) and is the only
+  // path source used here — never derived from client-supplied input.
+  return sendStream(event, createReadStream(join(uploadsDir(), attachment.diskPath)))
+})
