@@ -2,12 +2,13 @@
 const open = defineModel<boolean>('open', { default: false })
 const emit = defineEmits<{ created: [] }>()
 const { data: lists } = await useFetch('/api/projects')
-const { data: cats } = await useFetch('/api/categories')
+const { data: categories } = await useFetch('/api/categories')
 const projectItems = computed(() => [
   { label: '— none (general home expense) —', value: 0 },
-  ...['active', 'backlog', 'done'].flatMap(k => (lists.value?.[k] ?? []).map((p: any) => ({ label: p.name, value: p.id }))),
+  ...(['active', 'backlog', 'done'] as const).flatMap(listName =>
+    (lists.value?.[listName] ?? []).map(project => ({ label: project.name, value: project.id }))),
 ])
-const catItems = computed(() => (cats.value ?? []).map(c => ({ label: c.name, value: c.id })))
+const categoryItems = computed(() => (categories.value ?? []).map(category => ({ label: category.name, value: category.id })))
 const state = reactive({ amount: 0, date: new Date().toISOString().slice(0, 10), vendor: '', note: '', projectId: 0, categoryId: undefined as number | undefined })
 const toast = useToast()
 async function submit() {
@@ -15,7 +16,10 @@ async function submit() {
     await $fetch('/api/expenses', { method: 'POST', body: { ...state, amount: Number(state.amount), projectId: state.projectId || undefined } })
     open.value = false
     emit('created')
-  } catch (e: any) { toast.add({ title: e?.data?.statusMessage ?? 'Failed', color: 'error' }) }
+  } catch (submitError) {
+    const message = (submitError as { data?: { statusMessage?: string } }).data?.statusMessage
+    toast.add({ title: message ?? 'Failed to create expense', color: 'error' })
+  }
 }
 </script>
 
@@ -28,7 +32,7 @@ async function submit() {
         <UInput v-model="state.vendor" placeholder="Vendor" />
         <UInput v-model="state.note" placeholder="Note" />
         <USelect v-model="state.projectId" :items="projectItems" value-key="value" />
-        <USelect v-model="state.categoryId" :items="catItems" value-key="value" placeholder="Category" />
+        <USelect v-model="state.categoryId" :items="categoryItems" value-key="value" placeholder="Category" />
         <UButton type="submit" block>Add expense</UButton>
       </form>
     </template>

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-const { data: d, refresh } = await useFetch('/api/dashboard')
+const { data: dashboard, refresh } = await useFetch('/api/dashboard')
 const toast = useToast()
-const fmt = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 async function reorder(list: 'backlog' | 'active', orderedIds: number[]) {
   try {
     await $fetch('/api/projects/reorder', { method: 'POST', body: { list, orderedIds } })
@@ -14,29 +13,29 @@ async function reorder(list: 'backlog' | 'active', orderedIds: number[]) {
   <div class="grid gap-6 lg:grid-cols-2 max-w-5xl">
     <section>
       <h2 class="font-semibold mb-3">Active projects</h2>
-      <ProjectList :projects="d?.active ?? []" draggable @reorder="ids => reorder('active', ids)" />
+      <ProjectList :projects="dashboard?.active ?? []" draggable @reorder="ids => reorder('active', ids)" />
       <h2 class="font-semibold my-3">Backlog</h2>
-      <ProjectList :projects="d?.backlog ?? []" draggable @reorder="ids => reorder('backlog', ids)" />
+      <ProjectList :projects="dashboard?.backlog ?? []" draggable @reorder="ids => reorder('backlog', ids)" />
     </section>
     <section class="space-y-6">
-      <UCard v-if="d?.expiringQuotes.length">
+      <UCard v-if="dashboard?.expiringQuotes.length">
         <template #header>⏳ Quotes expiring soon</template>
-        <div v-for="q in d.expiringQuotes" :key="q.id" class="text-sm py-1">
-          <b>{{ q.companyName }}</b> ({{ q.projectName }}) — {{ fmt(q.amount) }}, valid until {{ q.validUntil }}
+        <div v-for="quote in dashboard.expiringQuotes" :key="quote.id" class="text-sm py-1">
+          <b>{{ quote.companyName }}</b> ({{ quote.projectName }}) — {{ formatCurrency(quote.amount) }}, valid until {{ quote.validUntil }}
         </div>
       </UCard>
-      <UCard v-if="d?.expiringWarranties.length">
+      <UCard v-if="dashboard?.expiringWarranties.length">
         <template #header>🛡️ Warranties expiring within 60 days</template>
-        <div v-for="i in d.expiringWarranties" :key="i.id" class="text-sm py-1">
-          <b>{{ i.name }}</b> — expires {{ i.warrantyExpiry }}
+        <div v-for="item in dashboard.expiringWarranties" :key="item.id" class="text-sm py-1">
+          <b>{{ item.name }}</b> — expires {{ item.warrantyExpiry }}
         </div>
       </UCard>
       <UCard>
         <template #header>Recent expenses</template>
-        <div v-for="e in d?.recentExpenses ?? []" :key="e.id" class="text-sm py-1 flex justify-between">
-          <span>{{ e.date }} — {{ e.vendor }}</span><span>{{ fmt(e.amount) }}</span>
+        <div v-for="expense in dashboard?.recentExpenses ?? []" :key="expense.id" class="text-sm py-1 flex justify-between">
+          <span>{{ expense.date }} — {{ expense.vendor }}</span><span>{{ formatCurrency(expense.amount) }}</span>
         </div>
-        <p v-if="!d?.recentExpenses.length" class="text-dimmed text-sm">No expenses yet.</p>
+        <p v-if="!dashboard?.recentExpenses.length" class="text-dimmed text-sm">No expenses yet.</p>
       </UCard>
     </section>
   </div>

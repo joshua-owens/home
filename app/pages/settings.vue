@@ -1,10 +1,10 @@
 <script setup lang="ts">
 const { data: settings } = await useFetch('/api/settings')
 const { data: userList, refresh: refreshUsers } = await useFetch('/api/users')
-const { data: cats, refresh: refreshCats } = await useFetch('/api/categories')
+const { data: categories, refresh: refreshCategories } = await useFetch('/api/categories')
 const toast = useToast()
 const household = reactive({ region: settings.value?.region ?? '', houseFacts: settings.value?.houseFacts ?? '' })
-const newCat = ref('')
+const newCategory = ref('')
 const newUser = reactive({ username: '', password: '', displayName: '' })
 const resetTarget = ref<{ id: number; password: string } | null>(null)
 
@@ -13,10 +13,10 @@ async function saveHousehold() {
   toast.add({ title: 'Household settings saved' })
 }
 async function addCategory() {
-  if (!newCat.value.trim()) return
-  await $fetch('/api/categories', { method: 'POST', body: { name: newCat.value } })
-  newCat.value = ''
-  await refreshCats()
+  if (!newCategory.value.trim()) return
+  await $fetch('/api/categories', { method: 'POST', body: { name: newCategory.value } })
+  newCategory.value = ''
+  await refreshCategories()
 }
 async function addUser() {
   try {
@@ -24,7 +24,10 @@ async function addUser() {
     Object.assign(newUser, { username: '', password: '', displayName: '' })
     await refreshUsers()
     toast.add({ title: 'Account created' })
-  } catch (e: any) { toast.add({ title: e?.data?.statusMessage ?? 'Failed', color: 'error' }) }
+  } catch (addError) {
+    const message = (addError as { data?: { statusMessage?: string } }).data?.statusMessage
+    toast.add({ title: message ?? 'Failed to create account', color: 'error' })
+  }
 }
 async function resetPassword() {
   if (!resetTarget.value) return
@@ -32,7 +35,10 @@ async function resetPassword() {
     await $fetch(`/api/users/${resetTarget.value.id}/password`, { method: 'POST', body: { password: resetTarget.value.password } })
     toast.add({ title: 'Password updated' })
     resetTarget.value = null
-  } catch (e: any) { toast.add({ title: e?.data?.statusMessage ?? 'Failed', color: 'error' }) }
+  } catch (resetError) {
+    const message = (resetError as { data?: { statusMessage?: string } }).data?.statusMessage
+    toast.add({ title: message ?? 'Failed to reset password', color: 'error' })
+  }
 }
 </script>
 
@@ -49,17 +55,17 @@ async function resetPassword() {
     </UCard>
     <UCard>
       <template #header>Expense categories</template>
-      <div class="flex flex-wrap gap-2 mb-3"><UBadge v-for="c in cats" :key="c.id" variant="subtle">{{ c.name }}</UBadge></div>
+      <div class="flex flex-wrap gap-2 mb-3"><UBadge v-for="category in categories" :key="category.id" variant="subtle">{{ category.name }}</UBadge></div>
       <form class="flex gap-2" @submit.prevent="addCategory">
-        <UInput v-model="newCat" placeholder="New category" class="flex-1" />
+        <UInput v-model="newCategory" placeholder="New category" class="flex-1" />
         <UButton type="submit">Add</UButton>
       </form>
     </UCard>
     <UCard>
       <template #header>Accounts</template>
-      <div v-for="u in userList" :key="u.id" class="flex items-center gap-2 py-1">
-        <span class="flex-1">{{ u.displayName }} <span class="text-dimmed">({{ u.username }})</span></span>
-        <UButton size="xs" variant="ghost" @click="resetTarget = { id: u.id, password: '' }">Reset password</UButton>
+      <div v-for="account in userList" :key="account.id" class="flex items-center gap-2 py-1">
+        <span class="flex-1">{{ account.displayName }} <span class="text-dimmed">({{ account.username }})</span></span>
+        <UButton size="xs" variant="ghost" @click="resetTarget = { id: account.id, password: '' }">Reset password</UButton>
       </div>
       <form class="flex gap-2 mt-4" @submit.prevent="addUser">
         <UInput v-model="newUser.displayName" placeholder="Name" />

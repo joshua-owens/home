@@ -4,8 +4,8 @@ const state = reactive({ username: '', password: '', displayName: '' })
 const error = ref('')
 const { fetch: refreshSession } = useUserSession()
 onMounted(async () => {
-  const s = await $fetch('/api/auth/status')
-  if (!s.needsSetup) navigateTo('/login')
+  const status = await $fetch('/api/auth/status')
+  if (!status.needsSetup) navigateTo('/login')
 })
 async function submit() {
   error.value = ''
@@ -13,7 +13,9 @@ async function submit() {
     await $fetch('/api/auth/setup', { method: 'POST', body: state })
     await refreshSession()
     navigateTo('/')
-  } catch (e: any) { error.value = e?.data?.statusMessage ?? 'Setup failed' }
+  } catch (submitError) {
+    error.value = (submitError as { data?: { statusMessage?: string } }).data?.statusMessage ?? 'Setup failed'
+  }
 }
 </script>
 

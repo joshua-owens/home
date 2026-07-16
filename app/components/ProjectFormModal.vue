@@ -10,8 +10,9 @@ async function submit() {
     open.value = false
     Object.assign(state, { name: '', description: '', status: 'idea' })
     emit('created')
-  } catch (e: any) {
-    toast.add({ title: e?.data?.statusMessage ?? 'Failed to create project', color: 'error' })
+  } catch (submitError) {
+    const message = (submitError as { data?: { statusMessage?: string } }).data?.statusMessage
+    toast.add({ title: message ?? 'Failed to create project', color: 'error' })
   }
 }
 </script>
