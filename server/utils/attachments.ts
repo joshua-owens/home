@@ -67,12 +67,13 @@ export async function listAttachments(db: Db, ownerType: OwnerType, ownerId: num
 
 export async function deleteAttachment(db: Db, uploadsDir: string, id: number): Promise<void> {
   const repo = db.getRepository(Attachment)
-  const a = await repo.findOneBy({ id })
-  if (!a) return
-  rmSync(join(uploadsDir, a.diskPath), { force: true })
+  const attachment = await repo.findOneBy({ id })
+  if (!attachment) return
+  rmSync(join(uploadsDir, attachment.diskPath), { force: true })
   await repo.delete(id)
 }
 
 export async function deleteAttachmentsFor(db: Db, uploadsDir: string, ownerType: OwnerType, ownerId: number): Promise<void> {
-  for (const a of await listAttachments(db, ownerType, ownerId)) await deleteAttachment(db, uploadsDir, a.id)
+  for (const attachment of await listAttachments(db, ownerType, ownerId))
+    await deleteAttachment(db, uploadsDir, attachment.id)
 }
