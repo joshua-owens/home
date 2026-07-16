@@ -1,11 +1,8 @@
 import { In } from 'typeorm'
 import { Project, type ProjectStatusValue } from '../database/entities'
 import type { Db } from './db'
-
-const createError =
-  globalThis.createError ??
-  ((error: { statusCode: number; statusMessage: string }) =>
-    Object.assign(new Error(error.statusMessage), error))
+import { httpError } from './http-error'
+import { pickDefined } from './pick'
 
 export type ProjectStatus = ProjectStatusValue
 export type ListName = 'backlog' | 'active' | 'done'
@@ -45,17 +42,13 @@ export async function createProject(db: Db, input: { name: string; description?:
 export async function updateProject(db: Db, id: number, patch: Partial<Pick<Project, 'name' | 'description' | 'status'>>): Promise<Project> {
   const repo = db.getRepository(Project)
   const existing = await repo.findOneBy({ id })
-  if (!existing) throw createError({ statusCode: 404, statusMessage: 'Project not found' })
+  if (!existing) throw httpError({ statusCode: 404, statusMessage: 'Project not found' })
   let rank = existing.rank
   if (patch.status && listId(patch.status) !== listId(existing.status))
     rank = await nextRank(db, listId(patch.status))
 
   // Whitelist only allowed fields to prevent mass-assignment
-  const whitelisted = {
-    ...(patch.name !== undefined && { name: patch.name }),
-    ...(patch.description !== undefined && { description: patch.description }),
-    ...(patch.status !== undefined && { status: patch.status }),
-  }
+  const whitelisted = pickDefined(patch, ['name', 'description', 'status'] as const)
 
   return repo.save({ ...existing, ...whitelisted, rank, updatedAt: new Date().toISOString() })
 }
