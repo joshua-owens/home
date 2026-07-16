@@ -1,8 +1,8 @@
 import { In } from 'typeorm'
 import { Project, type ProjectStatusValue } from '../database/entities'
 import type { Db } from './db'
-
-const createError = globalThis.createError ?? ((e: any) => Object.assign(new Error(e.statusMessage), e))
+import { httpError } from './http-error'
+import { pickDefined } from './pick'
 
 export type ProjectStatus = ProjectStatusValue
 export type ListName = 'backlog' | 'active' | 'done'
@@ -24,7 +24,7 @@ async function nextRank(db: Db, list: ListName): Promise<number> {
     where: { status: In(LIST_STATUSES[list]) },
     select: { rank: true },
   })
-  return rows.length ? Math.max(...rows.map(r => r.rank)) + 1 : 1
+  return rows.length ? Math.max(...rows.map(row => row.rank)) + 1 : 1
 }
 
 export async function createProject(db: Db, input: { name: string; description?: string; status?: ProjectStatus; createdBy?: number }): Promise<Project> {
@@ -42,33 +42,29 @@ export async function createProject(db: Db, input: { name: string; description?:
 export async function updateProject(db: Db, id: number, patch: Partial<Pick<Project, 'name' | 'description' | 'status'>>): Promise<Project> {
   const repo = db.getRepository(Project)
   const existing = await repo.findOneBy({ id })
-  if (!existing) throw createError({ statusCode: 404, statusMessage: 'Project not found' })
+  if (!existing) throw httpError({ statusCode: 404, statusMessage: 'Project not found' })
   let rank = existing.rank
   if (patch.status && listId(patch.status) !== listId(existing.status))
     rank = await nextRank(db, listId(patch.status))
 
   // Whitelist only allowed fields to prevent mass-assignment
-  const whitelisted = {
-    ...(patch.name !== undefined && { name: patch.name }),
-    ...(patch.description !== undefined && { description: patch.description }),
-    ...(patch.status !== undefined && { status: patch.status }),
-  }
+  const whitelisted = pickDefined(patch, ['name', 'description', 'status'] as const)
 
   return repo.save({ ...existing, ...whitelisted, rank, updatedAt: new Date().toISOString() })
 }
 
 export async function reorderList(db: Db, list: Exclude<ListName, 'done'>, orderedIds: number[]): Promise<void> {
   const repo = db.getRepository(Project)
-  for (let i = 0; i < orderedIds.length; i++)
-    await repo.update(orderedIds[i]!, { rank: i + 1 })
+  for (const [index, id] of orderedIds.entries())
+    await repo.update(id, { rank: index + 1 })
 }
 
 export async function listProjects(db: Db): Promise<Record<ListName, Project[]>> {
   const all = await db.getRepository(Project).find({ order: { rank: 'ASC' } })
   return {
-    backlog: all.filter(p => listId(p.status) === 'backlog'),
-    active: all.filter(p => listId(p.status) === 'active'),
-    done: all.filter(p => listId(p.status) === 'done'),
+    backlog: all.filter(project => listId(project.status) === 'backlog'),
+    active: all.filter(project => listId(project.status) === 'active'),
+    done: all.filter(project => listId(project.status) === 'done'),
   }
 }
 
