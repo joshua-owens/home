@@ -1,6 +1,7 @@
 import { Not } from 'typeorm'
 import { Quote } from '../database/entities'
 import type { Db } from './db'
+import { localDateString } from './dates'
 import { httpError } from './http-error'
 import { pickDefined } from './pick'
 
@@ -16,15 +17,8 @@ const UPDATABLE_QUOTE_FIELDS = [
 
 export function isExpired(quote: Pick<Quote, 'status' | 'validUntil'>, now = new Date()): boolean {
   if (quote.status !== 'pending' || !quote.validUntil) return false
-
-  // Build local date string (YYYY-MM-DD) from now parameter
-  const year = now.getFullYear()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  const localTodayString = `${year}-${month}-${day}`
-
   // Compare lexically: quote is expired only if validUntil is strictly BEFORE today
-  return quote.validUntil < localTodayString
+  return quote.validUntil < localDateString(now)
 }
 
 export async function createQuote(db: Db, input: { projectId: number; companyName: string; amount: number; contactInfo?: string; scopeNotes?: string; dateReceived?: string; validUntil?: string }): Promise<Quote> {
