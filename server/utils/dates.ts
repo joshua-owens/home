@@ -1,7 +1,3 @@
-export function formatCurrency(amount: number): string {
-  return amount.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
-}
-
 /** Local calendar date as YYYY-MM-DD, for lexical comparison against date-only columns. */
 export function localDateString(date: Date): string {
   const year = date.getFullYear()

@@ -32,6 +32,8 @@
     "@tiptap/suggestion": "^3.27.4",
     "@tiptap/vue-3": "^3.27.4",
     "better-sqlite3": "^12.11.1",
+    "isomorphic-dompurify": "^3.18.0",
+    "marked": "^18.0.6",
     "nuxt": "^4.4.8",
     "nuxt-auth-utils": "^0.5.29",
     "openai": "^6.46.0",
