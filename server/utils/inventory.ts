@@ -1,5 +1,7 @@
 import { InventoryItem } from '../database/entities'
 import type { Db } from './db'
+import { httpError } from './http-error'
+import { pickDefined } from './pick'
 
 export type InventoryInput = {
   name: string
@@ -12,26 +14,29 @@ export type InventoryInput = {
   notes?: string
 }
 
+const UPDATABLE_INVENTORY_FIELDS = [
+  'name',
+  'location',
+  'brand',
+  'model',
+  'serial',
+  'purchaseDate',
+  'warrantyExpiry',
+  'notes',
+] as const
+
 export async function createInventoryItem(db: Db, input: InventoryInput): Promise<InventoryItem> {
   const repo = db.getRepository(InventoryItem)
   return repo.save(repo.create(input))
 }
 
-export async function updateInventoryItem(db: Db, id: number, input: Partial<InventoryInput>): Promise<InventoryItem> {
+export async function updateInventoryItem(db: Db, id: number, patch: Partial<InventoryInput>): Promise<InventoryItem> {
   const repo = db.getRepository(InventoryItem)
   const existing = await repo.findOneBy({ id })
-  if (!existing) throw new Error(`Inventory item ${id} not found`)
+  if (!existing) throw httpError({ statusCode: 404, statusMessage: 'Inventory item not found' })
 
-  // Only overwrite fields present in input
-  const whitelisted: Partial<InventoryItem> = {}
-  if (input.name !== undefined) whitelisted.name = input.name
-  if (input.location !== undefined) whitelisted.location = input.location
-  if (input.brand !== undefined) whitelisted.brand = input.brand
-  if (input.model !== undefined) whitelisted.model = input.model
-  if (input.serial !== undefined) whitelisted.serial = input.serial
-  if (input.purchaseDate !== undefined) whitelisted.purchaseDate = input.purchaseDate
-  if (input.warrantyExpiry !== undefined) whitelisted.warrantyExpiry = input.warrantyExpiry
-  if (input.notes !== undefined) whitelisted.notes = input.notes
+  // Whitelist only allowed fields to prevent mass-assignment
+  const whitelisted = pickDefined(patch, UPDATABLE_INVENTORY_FIELDS)
 
   return repo.save({ ...existing, ...whitelisted })
 }

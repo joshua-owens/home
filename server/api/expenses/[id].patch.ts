@@ -1,22 +1,6 @@
-import { Expense } from '../../database/entities'
+import { updateExpense } from '../../utils/expenses'
 
 export default defineEventHandler(async (event) => {
   const id = Number(getRouterParam(event, 'id'))
-  const repo = (await useDb()).getRepository(Expense)
-  const existing = await repo.findOneBy({ id })
-  if (!existing) throw createError({ statusCode: 404, statusMessage: 'Expense not found' })
-
-  const body = await readBody(event)
-
-  // Whitelist only allowed fields to prevent mass-assignment
-  const whitelisted = {
-    ...(body.projectId !== undefined && { projectId: body.projectId }),
-    ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
-    ...(body.amount !== undefined && { amount: body.amount }),
-    ...(body.date !== undefined && { date: body.date }),
-    ...(body.vendor !== undefined && { vendor: body.vendor }),
-    ...(body.note !== undefined && { note: body.note }),
-  }
-
-  return repo.save({ ...existing, ...whitelisted })
+  return updateExpense(await useDb(), id, await readBody(event))
 })
