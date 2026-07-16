@@ -13,6 +13,6 @@ const dataDir = process.env.NUXT_DATA_DIR ?? '/data'
 const db = new Database(join(dataDir, 'sqlite.db'))
 const salt = randomBytes(16).toString('hex')
 const hash = `${salt}:${scryptSync(password, salt, 64).toString('hex')}`
-const res = db.prepare('UPDATE users SET password_hash = ? WHERE username = ?').run(hash, username.toLowerCase())
-console.log(res.changes ? `Password reset for ${username}` : `No user named ${username}`)
-process.exit(res.changes ? 0 : 1)
+const result = db.prepare('UPDATE users SET password_hash = ? WHERE username = ?').run(hash, username.toLowerCase())
+console.log(result.changes ? `Password reset for ${username}` : `No user named ${username}`)
+process.exit(result.changes ? 0 : 1)

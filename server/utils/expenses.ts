@@ -15,10 +15,7 @@ export async function createExpense(db: Db, input: { projectId?: number; categor
   return repo.save(repo.create({
     amount: input.amount,
     date: input.date,
-    ...(input.projectId !== undefined && { projectId: input.projectId }),
-    ...(input.categoryId !== undefined && { categoryId: input.categoryId }),
-    ...(input.vendor !== undefined && { vendor: input.vendor }),
-    ...(input.note !== undefined && { note: input.note }),
+    ...pickDefined(input, ['projectId', 'categoryId', 'vendor', 'note'] as const),
   }))
 }
 

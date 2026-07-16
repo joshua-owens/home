@@ -29,10 +29,7 @@ export async function createQuote(db: Db, input: { projectId: number; companyNam
     projectId: input.projectId,
     companyName: input.companyName,
     amount: input.amount,
-    ...(input.contactInfo !== undefined && { contactInfo: input.contactInfo }),
-    ...(input.scopeNotes !== undefined && { scopeNotes: input.scopeNotes }),
-    ...(input.dateReceived !== undefined && { dateReceived: input.dateReceived }),
-    ...(input.validUntil !== undefined && { validUntil: input.validUntil }),
+    ...pickDefined(input, ['contactInfo', 'scopeNotes', 'dateReceived', 'validUntil'] as const),
   }))
 }
 
