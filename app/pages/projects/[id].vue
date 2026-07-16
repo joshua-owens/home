@@ -9,7 +9,6 @@ const { data: expenses, refresh: refreshExpenses } = await useFetch('/api/expens
 const showNewQuote = ref(false)
 const statuses = ['idea', 'researching', 'quoting', 'in_progress', 'on_hold', 'done']
 const toast = useToast()
-const fmt = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
 
 async function setStatus(status: string) {
   await $fetch(`/api/projects/${id}`, { method: 'PATCH', body: { status } })
@@ -57,11 +56,11 @@ const tabs = [
       </template>
       <template #expenses>
         <div class="py-4 space-y-4">
-          <UAlert v-if="spend" :title="`Spent ${fmt(spend.spent)} of ${fmt(spend.quoted)} accepted quotes`"
+          <UAlert v-if="spend" :title="`Spent ${formatCurrency(spend.spent)} of ${formatCurrency(spend.quoted)} accepted quotes`"
             :color="spend.spent > spend.quoted ? 'warning' : 'info'" variant="subtle" />
           <ul class="text-sm space-y-1">
-            <li v-for="e in expenses" :key="e.id" class="flex justify-between border-b border-default py-1">
-              <span>{{ e.date }} — {{ e.vendor }} {{ e.note && `(${e.note})` }}</span><span>{{ fmt(e.amount) }}</span>
+            <li v-for="expense in expenses" :key="expense.id" class="flex justify-between border-b border-default py-1">
+              <span>{{ expense.date }} — {{ expense.vendor }} {{ expense.note && `(${expense.note})` }}</span><span>{{ formatCurrency(expense.amount) }}</span>
             </li>
           </ul>
           <p class="text-dimmed text-sm">Add expenses from the Expenses page and link them to this project.</p>
