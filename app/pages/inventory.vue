@@ -3,29 +3,21 @@ const { data: items, refresh } = await useFetch('/api/inventory')
 const search = ref('')
 const showNew = ref(false)
 const filtered = computed(() => {
-  const q = search.value.toLowerCase()
-  return (items.value ?? []).filter(i => [i.name, i.location, i.brand, i.model].join(' ').toLowerCase().includes(q))
+  const searchText = search.value.toLowerCase()
+  return (items.value ?? []).filter(item =>
+    [item.name, item.location, item.brand, item.model].join(' ').toLowerCase().includes(searchText))
 })
 function warrantyBadge(expiry: string | null): { label: string; color: string } | null {
   if (!expiry) return null
 
-  // Build local date strings for lexical comparison (YYYY-MM-DD)
+  // Compare lexically against local YYYY-MM-DD strings
   const now = new Date()
-  const year = now.getFullYear()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  const todayString = `${year}-${month}-${day}`
+  const today = localDateString(now)
+  const inSixtyDays = new Date(now)
+  inSixtyDays.setDate(inSixtyDays.getDate() + 60)
 
-  // Calculate +60 days from today
-  const plus60Date = new Date(now)
-  plus60Date.setDate(plus60Date.getDate() + 60)
-  const plus60Year = plus60Date.getFullYear()
-  const plus60Month = String(plus60Date.getMonth() + 1).padStart(2, '0')
-  const plus60Day = String(plus60Date.getDate()).padStart(2, '0')
-  const plus60String = `${plus60Year}-${plus60Month}-${plus60Day}`
-
-  if (expiry < todayString) return { label: 'warranty expired', color: 'warning' }
-  if (expiry <= plus60String) return { label: 'warranty expiring', color: 'warning' }
+  if (expiry < today) return { label: 'warranty expired', color: 'warning' }
+  if (expiry <= localDateString(inSixtyDays)) return { label: 'warranty expiring', color: 'warning' }
   return { label: 'under warranty', color: 'success' }
 }
 async function remove(id: number) {
@@ -41,18 +33,18 @@ async function remove(id: number) {
       <UButton icon="i-lucide-plus" @click="showNew = true">New item</UButton>
     </div>
     <UInput v-model="search" icon="i-lucide-search" placeholder="Search name, location, brand…" />
-    <UCard v-for="i in filtered" :key="i.id">
+    <UCard v-for="item in filtered" :key="item.id">
       <div class="flex items-center gap-3">
         <div class="flex-1">
-          <div class="font-medium">{{ i.name }}</div>
-          <div class="text-sm text-dimmed">{{ [i.brand, i.model, i.location].filter(Boolean).join(' · ') }}</div>
+          <div class="font-medium">{{ item.name }}</div>
+          <div class="text-sm text-dimmed">{{ [item.brand, item.model, item.location].filter(Boolean).join(' · ') }}</div>
         </div>
-        <UBadge v-if="warrantyBadge(i.warrantyExpiry)" :color="warrantyBadge(i.warrantyExpiry)!.color" variant="subtle">
-          {{ warrantyBadge(i.warrantyExpiry)!.label }}
+        <UBadge v-if="warrantyBadge(item.warrantyExpiry)" :color="warrantyBadge(item.warrantyExpiry)!.color" variant="subtle">
+          {{ warrantyBadge(item.warrantyExpiry)!.label }}
         </UBadge>
-        <ConfirmDelete :label="i.name" @confirm="remove(i.id)" />
+        <ConfirmDelete :label="item.name" @confirm="remove(item.id)" />
       </div>
-      <AttachmentList class="mt-3" owner-type="inventory_item" :owner-id="i.id" />
+      <AttachmentList class="mt-3" owner-type="inventory_item" :owner-id="item.id" />
     </UCard>
     <InventoryFormModal v-model:open="showNew" @created="refresh()" />
   </div>
