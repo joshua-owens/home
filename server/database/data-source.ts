@@ -1,4 +1,3 @@
-import 'reflect-metadata'
 import { join } from 'node:path'
 import { DataSource } from 'typeorm'
 import { entities, Category, HouseholdSettings } from './entities'
