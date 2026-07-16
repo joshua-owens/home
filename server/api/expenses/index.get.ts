@@ -1,10 +1,10 @@
 import { listExpenses } from '../../utils/expenses'
 export default defineEventHandler(async (event) => {
-  const q = getQuery(event)
+  const query = getQuery(event)
   return listExpenses(await useDb(), {
-    projectId: q.projectId ? Number(q.projectId) : undefined,
-    categoryId: q.categoryId ? Number(q.categoryId) : undefined,
-    from: q.from as string | undefined,
-    to: q.to as string | undefined,
+    projectId: query.projectId ? Number(query.projectId) : undefined,
+    categoryId: query.categoryId ? Number(query.categoryId) : undefined,
+    from: query.from as string | undefined,
+    to: query.to as string | undefined,
   })
 })

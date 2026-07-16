@@ -1,5 +1,6 @@
 import { HouseholdSettings } from '../database/entities'
 import type { Db } from './db'
+import { pickDefined } from './pick'
 
 const SINGLETON_ID = 1
 
@@ -28,9 +29,7 @@ export async function updateSettings(db: Db, patch: { region?: string; houseFact
   }
 
   // Only overwrite fields present in patch
-  const updated: Partial<HouseholdSettings> = {}
-  if (patch.region !== undefined) updated.region = patch.region
-  if (patch.houseFacts !== undefined) updated.houseFacts = patch.houseFacts
+  const whitelisted = pickDefined(patch, ['region', 'houseFacts'] as const)
 
-  return repo.save({ ...existing, ...updated })
+  return repo.save({ ...existing, ...whitelisted })
 }
