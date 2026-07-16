@@ -10,7 +10,13 @@ export type ExpenseFilter = { projectId?: number; categoryId?: number; from?: st
 
 export async function createExpense(db: Db, input: { projectId?: number; categoryId?: number; amount: number; date: string; vendor?: string; note?: string }): Promise<Expense> {
   const repo = db.getRepository(Expense)
-  return repo.save(repo.create(input))
+  // Whitelist fields at runtime — TS types erase, and a stray `id` in the
+  // input would make save() upsert over an existing row.
+  return repo.save(repo.create({
+    amount: input.amount,
+    date: input.date,
+    ...pickDefined(input, ['projectId', 'categoryId', 'vendor', 'note'] as const),
+  }))
 }
 
 export async function updateExpense(db: Db, id: number, patch: Partial<Omit<Expense, 'id'>>): Promise<Expense> {
