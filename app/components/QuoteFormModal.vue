@@ -9,7 +9,10 @@ async function submit() {
     await $fetch('/api/quotes', { method: 'POST', body: { ...state, amount: Number(state.amount), projectId: props.projectId, dateReceived: state.dateReceived || undefined, validUntil: state.validUntil || undefined } })
     open.value = false
     emit('created')
-  } catch (e: any) { toast.add({ title: e?.data?.statusMessage ?? 'Failed', color: 'error' }) }
+  } catch (submitError) {
+    const message = (submitError as { data?: { statusMessage?: string } }).data?.statusMessage
+    toast.add({ title: message ?? 'Failed to create quote', color: 'error' })
+  }
 }
 </script>
 

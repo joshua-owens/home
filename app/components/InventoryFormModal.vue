@@ -8,7 +8,10 @@ async function submit() {
     await $fetch('/api/inventory', { method: 'POST', body: { ...state, purchaseDate: state.purchaseDate || undefined, warrantyExpiry: state.warrantyExpiry || undefined } })
     open.value = false
     emit('created')
-  } catch (e: any) { toast.add({ title: e?.data?.statusMessage ?? 'Failed', color: 'error' }) }
+  } catch (submitError) {
+    const message = (submitError as { data?: { statusMessage?: string } }).data?.statusMessage
+    toast.add({ title: message ?? 'Failed to create item', color: 'error' })
+  }
 }
 </script>
 
